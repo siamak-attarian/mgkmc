@@ -3,10 +3,13 @@ pyproject.toml
 setup.py
 mgkmc/__init__.py
 mgkmc/elasticity.py
+mgkmc/elasticity_helpers.py
 mgkmc/fft.py
 mgkmc/microstructure.py
+mgkmc/plotting.py
 mgkmc/postprocess.py
 mgkmc/solver.py
+mgkmc/stz_model.py
 mgkmc.egg-info/PKG-INFO
 mgkmc.egg-info/SOURCES.txt
 mgkmc.egg-info/dependency_links.txt

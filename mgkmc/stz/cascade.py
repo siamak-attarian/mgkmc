@@ -1,0 +1,74 @@
+from .barriers import compute_barrier
+from .softening import update_softening
+from .update_fft import update_stress_fft
+
+def apply_flip(voxel, mode_idx, jp=10, jt=30, g_max=None):
+    gamma = voxel.catalog[mode_idx]
+    voxel.eps_plastic += gamma
+    voxel.prev_gamma = gamma # Record for directional softening
+    update_softening(voxel, gamma, jp=jp, jt=jt, g_max=g_max)
+    voxel.catalog = [gamma*0 for gamma in voxel.catalog]  # replace with real generator
+    voxel.flip_count_total += 1
+
+def find_unstable(grid, volume, softening_scheme="isotropic", debug=False, debug_first_flip=False):
+    Nx, Ny, Nz = grid.shape
+    unstable = []
+
+    for x in range(Nx):
+        for y in range(Ny):
+            for z in range(Nz):
+                voxel = grid[x,y,z]
+                
+                # Enable debug for first unstable voxel if requested
+                is_debug = debug or (debug_first_flip and len(unstable) == 0)
+                Q = compute_barrier(voxel, volume, softening_scheme=softening_scheme, debug=is_debug)
+                m = Q.argmin()
+                
+                if Q[m] < 0:
+                    if is_debug:
+                        print(f"\n[DEBUG] UNSTABLE voxel at ({x},{y},{z}), mode {m}")
+                        print(f"[DEBUG]   Q_min = {Q[m]:.6f} eV")
+                        print(f"[DEBUG]   Stress (Pa): {voxel.sigma}")
+                        print(f"[DEBUG]   Plastic strain: {voxel.eps_plastic}")
+                    unstable.append((x,y,z,m))
+    
+    if debug_first_flip and len(unstable) > 0:
+        print(f"[DEBUG] Total unstable voxels: {len(unstable)}")
+    
+    return unstable
+
+def cascade_step(grid, eps_macro, E, nu,
+                 volume, pixel,
+                 generation_function, solver_args):
+
+    unstable = find_unstable(grid, volume)
+    if not unstable:
+        return False
+
+    for x,y,z,m in unstable:
+        voxel = grid[x,y,z]
+
+        # update + softening
+        apply_flip(voxel, m)
+
+        voxel.catalog = generation_function(voxel.M)
+
+    update_stress_fft(grid, eps_macro, E, nu, pixel, **solver_args)
+    return True
+
+
+def run_athermal_cascade(grid, eps_macro, E, nu,
+                         volume, pixel,
+                         generation_function, solver_args):
+
+    update_stress_fft(grid, eps_macro, E, nu, pixel, **solver_args)
+
+    local_step = 0
+    while cascade_step(
+        grid, eps_macro, E, nu,
+        volume, pixel,
+        generation_function, solver_args
+    ):
+        local_step += 1
+
+    return local_step

@@ -18,7 +18,8 @@ def stress_from_strain(eps, E, nu):
 def green_operator(kx, ky, kz, lam0, mu0):
     """
     Fully-correct 3D isotropic Green operator for strain.
-    Γ^0_khij(k), following reference convention.
+    Γ^0_khij(k), with spatial dimensions first: (nx, ny, nz, 3, 3, 3, 3)
+    Gamma[x,y,z,k,h,i,j] operates on tau[x,y,z,i,j] to give eps_tilde[x,y,z,k,h]
     """
     nx, ny, nz = kx.shape
     k2 = kx*kx + ky*ky + kz*kz
@@ -27,7 +28,7 @@ def green_operator(kx, ky, kz, lam0, mu0):
     
     q = [kx, ky, kz]
     
-    Gamma = np.zeros((3,3,3,3,nx,ny,nz))
+    Gamma = np.zeros((nx, ny, nz, 3, 3, 3, 3))
     
     A = 1.0/(4*mu0)
     B = (lam0+mu0)/(mu0*(lam0+2*mu0))
@@ -45,8 +46,8 @@ def green_operator(kx, ky, kz, lam0, mu0):
                     
                     term2 = B * (q[k]*q[h]*q[i]*q[j]) / (k2_safe*k2_safe)
                     
-                    Gamma[k,h,i,j,:,:,:] = term1 - term2
+                    Gamma[:, :, :, k, h, i, j] = term1 - term2
     
-    Gamma[:,:,:,:,0,0,0] = 0
+    Gamma[0, 0, 0, :, :, :, :] = 0
     
     return Gamma

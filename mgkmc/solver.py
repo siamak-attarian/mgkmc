@@ -2,63 +2,82 @@ import numpy as np
 from .elasticity import compute_lame, stress_from_strain, green_operator
 from .fft import compute_wave_vectors, fft_field, ifft_field
 import pyfftw.interfaces.numpy_fft as fft
-def spectral_solver_3d(E, nu, eps_bar,
+
+def spectral_solver_3d(E, nu, eps_bar, eps_plastic=None,
                        max_iter=200, tol=1e-6,
                        verbose=False, pixel=1.0):
+
     nx, ny, nz = E.shape
     lam, mu = compute_lame(E, nu)
     lam0, mu0 = compute_lame(E.mean(), nu.mean())
     
     Lx, Ly, Lz = nx*pixel, ny*pixel, nz*pixel
     kx, ky, kz = compute_wave_vectors(nx, ny, nz, Lx, Ly, Lz)
-    Gamma = green_operator(kx, ky, kz, lam0, mu0)  # Shape: [3,3,3,3,nx,ny,nz]
-
-    # Reshape eps and sig to match reference: [3,3,nx,ny,nz]
-    eps = np.zeros((3, 3, nx, ny, nz))
+    Gamma = green_operator(kx, ky, kz, lam0, mu0)  # [nx,ny,nz,3,3,3,3]
+    
+    # ----------------------------------------------------------------------
+    # INITIALIZE strain with macro (total strain guess)
+    # ----------------------------------------------------------------------
+    eps = np.zeros((nx, ny, nz, 3, 3))
+    
+    # eps_total = eps_bar
     for i in range(3):
         for j in range(3):
-            eps[i, j, :, :, :] = eps_bar[i, j]
-
+            eps[:, :, :, i, j] = eps_bar[i, j]
+    
+    # ----------------------------------------------------------------------
+    # MAIN Lippmann-Schwinger iteration
+    # ----------------------------------------------------------------------
     for it in range(max_iter):
-        # Compute stress - reshape to match
-        sig = np.zeros((3, 3, nx, ny, nz))
+
+        # Stress from heterogeneous moduli: C : (eps - eps_plastic)
+        if eps_plastic is not None:
+             sig = stress_from_strain(eps - eps_plastic, E, nu)
+        else:
+             sig = stress_from_strain(eps, E, nu)
+
+        # Reference stress (homogeneous medium): C0 : eps
+        sig0 = stress_from_strain(
+            eps,
+            E*0 + E.mean(),
+            nu*0 + nu.mean()
+        )
+        
+        # Polarization stress
+        tau = sig - sig0  # [nx,ny,nz,3,3]
+        
+        # FFT of tau
+        tau_hat = np.zeros((nx, ny, nz, 3, 3), dtype=complex)
         for i in range(3):
             for j in range(3):
-                sig[i, j] = stress_from_strain(
-                    eps.transpose(2,3,4,0,1), E, nu
-                )[..., i, j]
+                tau_hat[:, :, :, i, j] = fft_field(tau[:, :, :, i, j])
         
-        # Reference stress
-        sig0 = np.zeros((3, 3, nx, ny, nz))
+        # Apply Green operator
+        eps_tilde_hat = -np.einsum("xyzkhij,xyzij->xyzkh", Gamma, tau_hat)
+        
+        # Inverse FFT
+        eps_tilde = np.zeros((nx, ny, nz, 3, 3))
         for i in range(3):
             for j in range(3):
-                sig0[i, j] = stress_from_strain(
-                    eps.transpose(2,3,4,0,1),
-                    E*0 + E.mean(),
-                    nu*0 + nu.mean()
-                )[..., i, j]
+                eps_tilde[:, :, :, i, j] = ifft_field(eps_tilde_hat[:, :, :, i, j])
         
-        tau = sig - sig0
-        tau_hat = np.zeros((3, 3, nx, ny, nz), dtype=complex)
+        # Zero mean value of each component
         for i in range(3):
             for j in range(3):
-                tau_hat[i, j] = fft_field(tau[i, j])
+                eps_tilde[:, :, :, i, j] -= eps_tilde[:, :, :, i, j].mean()
         
-        # Apply Green operator: Gamma[k,h,i,j] * tau[i,j] -> eps_tilde[k,h]
-        eps_tilde_hat = -np.einsum("khijxyz,ijxyz->khxyz", Gamma, tau_hat)
-        
-        eps_tilde = np.zeros((3, 3, nx, ny, nz))
+        # ------------------------------------------------------------------
+        # UPDATE: eps_total = eps_bar + eps_tilde
+        # ------------------------------------------------------------------
+        eps_new = np.zeros((nx, ny, nz, 3, 3))
         for i in range(3):
             for j in range(3):
-                eps_tilde[i, j] = ifft_field(eps_tilde_hat[i, j])
+                eps_new[:, :, :, i, j] = (
+                    eps_bar[i, j]
+                    + eps_tilde[:, :, :, i, j]
+                )
         
-        # Zero mean
-        for i in range(3):
-            for j in range(3):
-                eps_tilde[i, j] -= eps_tilde[i, j].mean()
-        
-        eps_new = eps_bar[:, :, None, None, None] + eps_tilde
-        
+        # Convergence check
         diff = np.linalg.norm(eps_new - eps) / (np.linalg.norm(eps) + 1e-20)
         eps = eps_new
         
@@ -68,13 +87,18 @@ def spectral_solver_3d(E, nu, eps_bar,
         if diff < tol:
             break
     
-    # Convert back to original format
-    eps_out = eps.transpose(2, 3, 4, 0, 1)
-    sig_out = stress_from_strain(eps_out, E, nu)
-    eps_macro = eps_out.mean(axis=(0,1,2))
-    sig_macro = sig_out.mean(axis=(0,1,2))
+    # ----------------------------------------------------------------------
+    # Final output
+    # ----------------------------------------------------------------------
+    if eps_plastic is not None:
+        sig_out = stress_from_strain(eps - eps_plastic, E, nu)
+    else:
+        sig_out = stress_from_strain(eps, E, nu)
+    eps_macro = eps.mean(axis=(0, 1, 2))
+    sig_macro = sig_out.mean(axis=(0, 1, 2))
     
-    return eps_out, sig_out, eps_macro, sig_macro
+    return eps, sig_out, eps_macro, sig_macro
+
 
 def run_simulation(
     E, nu,

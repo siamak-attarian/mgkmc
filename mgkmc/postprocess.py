@@ -223,7 +223,7 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         cell_data=cell_data
     )
     mesh.write(filename)
-    print(f"VTK export complete: {filename}")
+    #print(f"VTK export complete: {filename}")
 
 
 def export_simulation_vtk(
