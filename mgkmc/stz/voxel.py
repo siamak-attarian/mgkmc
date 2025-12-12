@@ -25,8 +25,9 @@ class Voxel:
         self.g_t = 0.0
         self.prev_gamma = None # for directional softening
 
-        # event catalog (to be filled externally)
-        self.catalog = [np.zeros((3,3)) for _ in range(M)]
+        # event catalog (stored as numpy array for efficient vectorization)
+        # Shape: (M, 3, 3) - M modes, each is a 3x3 strain tensor
+        self.catalog = np.zeros((M, 3, 3))
 
         # bookkeeping
         self.flip_count_total = 0
@@ -35,7 +36,11 @@ class Voxel:
 
     def set_catalog(self, catalog):
         """Replace catalog modes."""
-        self.catalog = catalog
+        # Convert to numpy array if it's a list
+        if isinstance(catalog, list):
+            self.catalog = np.array(catalog)
+        else:
+            self.catalog = catalog
 
     def reset_barriers(self, barrier_generator=None):
         if barrier_generator is None:

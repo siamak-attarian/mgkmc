@@ -12,7 +12,7 @@ def main():
     np.random.seed(SEED)
     print(f"Random seed set to {SEED}")
 
-    nx, ny, nz = 128,128, 1
+    nx, ny, nz = 128,128, 5
     pixel = 0.7
     M = 20
     gamma0 = 0.14
@@ -31,11 +31,11 @@ def main():
     ENABLE_SOFTENING = True 
     SOFTENING_SCHEME = "directional"  # Options: "isotropic", "directional"
     SOFTENING_PARAMS = {"jp": 11, "jt": 33}
-    SOFTENING_CAP = 0.51 # Limit on g_p. Set to None for unlimited.
+    SOFTENING_CAP = -np.log(0.4) # Limit on g_p. Set to None for unlimited.
     
     # Simulation Control
     DEBUG_FIRST_FLIP = False     # Set True to see details of the first instability
-    OUTPUT_DIR = "aqs_demo_output_uniaxial_128"
+    OUTPUT_DIR = "aqs_demo_output_uniaxial_128_new_2000_log(0.4)_5"
 
     # ----------------------------------------------------
     # 3. Custom Barrier Generator
@@ -79,8 +79,8 @@ def main():
     # 5. Define Loading Protocol - UNIAXIAL TENSION
     # ----------------------------------------------------
     # Uniaxial tension: sigma_yy = sigma_zz = 0
-    eps_target = 0.10  # 10% strain
-    n_steps = 1000
+    eps_target = 0.20  # 10% strain
+    n_steps = 2000
     
     # ----------------------------------------------------
     # 6. Run
@@ -92,8 +92,8 @@ def main():
         loading_func=get_uniaxial_stress_x,
         loading_params={
             "eps_xx": eps_target,
-            "E": E,
-            "nu": nu,
+            "E": E.mean(),
+            "nu": nu.mean(),
         }
     )
     

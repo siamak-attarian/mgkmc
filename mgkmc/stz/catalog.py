@@ -32,5 +32,9 @@ def stz_catalog_glass(M, gamma0):
     """
     Generate M independent STZ modes for a voxel,
     exactly matching the C-code random glass initialization.
+    Returns numpy array of shape (M, 3, 3).
     """
-    return [stz_mode_glass(gamma0) for _ in range(M)]
+    catalog = np.zeros((M, 3, 3))
+    for i in range(M):
+        catalog[i] = stz_mode_glass(gamma0)
+    return catalog

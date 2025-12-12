@@ -223,8 +223,8 @@ class AthermalSimulation:
             
             # Stop criteria: >20% of elements flipped
             n_elements = self.nx * self.ny * self.nz
-            if total_flips > 0.5 * n_elements:
-                raise RuntimeError(f"Simulation stopped: More than 50% of elements flipped ({total_flips} > {0.2 * n_elements:.1f}) in a single cascade.")
+            if total_flips > 0.8 * n_elements:
+                raise RuntimeError(f"Simulation stopped: More than 50% of elements flipped ({total_flips} > {0.5 * n_elements:.1f}) in a single cascade.")
             
             
             for x, y, z, m in unstable:
