@@ -4,6 +4,7 @@ import time
 from mgkmc.stz.grid import initialize_grid
 from mgkmc.stz.cascade import find_unstable, apply_flip
 from mgkmc.stz.update_fft import update_stress_fft, update_stress_fft_full
+from mgkmc.elasticity import stress_from_strain
 from mgkmc.stz.catalog import stz_catalog_glass
 from mgkmc.postprocess import export_to_vtk
 
@@ -77,11 +78,22 @@ class AthermalSimulation:
         # Solver config
         self.solver_args = solver_args if solver_args else {"max_iter": 200, "tol": 1e-6}
         
+        # Store initial fields (in GPa for E)
+        self.E_field_initial = E_field.copy()  # GPa
+        self.nu_field_initial = nu_field.copy()
+        
         # Convert E from GPa to Pa for internal use
         self.E = E_field * 1e9  # GPa → Pa
         self.nu = nu_field
         self.mode_generator = mode_generator
         self.barrier_generator = barrier_generator
+        
+        # Checkpoint tracking
+        self.current_step = 0
+        self.loading_func_name = None
+        self.loading_params = None
+        self.strain_increment_tensor = None
+        self.vtk_mode = None
 
         # Initialize Grid
         print(f"Initializing {nx}x{ny}x{nz} grid with M={M}, gamma0={gamma0}...")
@@ -108,8 +120,88 @@ class AthermalSimulation:
         # History for plotting
         self.history_global = [] # List of (eps_xx, sig_xx) tuples
         self.history_detailed = [] # List of (eps_xx, sig_xx) tuples including cascades
+        self.flip_event_history = [] # List of tuples: (global_step, local_step, x, y, z, m)
         
         self._init_logs()
+    
+    def save_checkpoint(self, filename):
+        """
+        Save complete simulation state to checkpoint file.
+        
+        Parameters
+        ----------
+        filename : str
+            Path to checkpoint file (HDF5 format)
+        """
+        from mgkmc.checkpoint import save_checkpoint
+        save_checkpoint(self, filename)
+    
+    def export_vtk(self, filename):
+        """
+        Export current state to VTK.
+        
+        Parameters
+        ----------
+        filename : str
+            Output path for VTK file.
+        """
+        from mgkmc.postprocess import export_to_vtk
+        export_to_vtk(filename, self.eps_field, self.sig_field, self.E, self.nu, self.pixel,
+                      grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
+    
+    @classmethod
+    def load_checkpoint(cls, filename):
+        """
+        Load simulation from checkpoint file.
+        
+        Parameters
+        ----------
+        filename : str
+            Path to checkpoint file
+        
+        Returns
+        -------
+        sim : AthermalSimulation
+            Reconstructed simulation instance
+        """
+        from mgkmc.checkpoint import load_checkpoint
+        return load_checkpoint(filename)
+    
+    def get_plastic_strain_field(self):
+        """
+        Extract plastic strain field from all voxels.
+        
+        Returns
+        -------
+        eps_plastic : np.ndarray (nx, ny, nz, 3, 3)
+            Plastic strain tensor field
+        """
+        eps_plastic = np.zeros((self.nx, self.ny, self.nz, 3, 3))
+        for i in range(self.nx):
+            for j in range(self.ny):
+                for k in range(self.nz):
+                    eps_plastic[i, j, k] = self.grid[i, j, k].eps_plastic
+        return eps_plastic
+    
+    def get_softening_fields(self):
+        """
+        Extract softening parameter fields from all voxels.
+        
+        Returns
+        -------
+        g_p : np.ndarray (nx, ny, nz)
+            Plastic softening field
+        g_t : np.ndarray (nx, ny, nz)
+            Transient softening field
+        """
+        g_p = np.zeros((self.nx, self.ny, self.nz))
+        g_t = np.zeros((self.nx, self.ny, self.nz))
+        for i in range(self.nx):
+            for j in range(self.ny):
+                for k in range(self.nz):
+                    g_p[i, j, k] = self.grid[i, j, k].g_p
+                    g_t[i, j, k] = self.grid[i, j, k].g_t
+        return g_p, g_t
 
     def _init_logs(self):
         # Global Log Header
@@ -221,6 +313,10 @@ class AthermalSimulation:
             n_flips = len(unstable)
             total_flips += n_flips
             
+            # Record detailed flip history
+            for x, y, z, m in unstable:
+                self.flip_event_history.append((global_step, local_step, x, y, z, m))
+            
             # Stop criteria: >20% of elements flipped
             n_elements = self.nx * self.ny * self.nz
             if total_flips > 0.8 * n_elements:
@@ -263,14 +359,17 @@ class AthermalSimulation:
             # Optional: Intermediate VTK for detailed local steps?
             if self.vtk_mode == "detailed":
                  fname = os.path.join(self.output_dir, f"step_{global_step:04d}_local_{local_step:04d}.vtu")
-                 export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, match_matplotlib_orientation=True)
+                 export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, 
+                              grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
 
             local_step += 1
             
         return local_step, total_flips, eps_macro_out, sig_macro_out
 
     def run(self, n_global_steps, strain_increment_tensor=None, vtk_mode="global", 
-            loading_func=None, loading_params=None):
+            loading_func=None, loading_params=None,
+            checkpoint_interval=None, checkpoint_path=None, keep_checkpoints=False,
+            stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0):
         """
         Run AQS simulation.
         
@@ -287,10 +386,41 @@ class AthermalSimulation:
             If provided, uses this instead of strain_increment_tensor
         loading_params : dict, optional
             Parameters for loading_func (e.g., {"eps_xx": 0.1, "E": E, "nu": nu})
+        checkpoint_interval : int, optional
+            Save checkpoint every N steps
+        checkpoint_path : str, optional
+            Base path for checkpoints
+        keep_checkpoints : bool
+            Save unique files if True
+        stop_on_stress_drop : float, optional
+            Stop if stress drops by this fraction
+        stress_drop_component : tuple
+            Which stress component to check
+        stop_post_drop_steps : int
+            Steps to continue after drop
         """
         print("Starting AQS Simulation...")
         self.vtk_mode = vtk_mode
         self.mode_generator = getattr(self, 'mode_generator', stz_catalog_glass)
+        
+        # Checkpoint setup
+        if checkpoint_interval is not None and checkpoint_path is None:
+            checkpoint_path = os.path.join(self.output_dir, "checkpoint")
+        
+        # Store loading configuration for checkpointing
+        if loading_func is not None:
+            self.loading_func_name = loading_func.__name__ if hasattr(loading_func, '__name__') else str(loading_func)
+            self.loading_params = loading_params
+            self.strain_increment_tensor = None
+        else:
+            self.loading_func_name = None
+            self.loading_params = None
+            self.strain_increment_tensor = strain_increment_tensor
+
+        # Stop logic state
+        stop_drop_triggered = False
+        stop_countdown = stop_post_drop_steps
+        prev_stress_val = 0.0
         
         # Determine loading mode
         if loading_func is not None:
@@ -309,6 +439,7 @@ class AthermalSimulation:
         # ==========================
         # Global Step 0: Initial Relaxation
         # ==========================
+        self.current_step = 0
         print("Step 0 (Initial Relaxation)...")
         self.eps_field, self.sig_field, eps_macro_curr, sig_macro_curr = update_stress_fft_full(
             self.grid, self.eps_macro, self.E, self.nu, 
@@ -318,14 +449,18 @@ class AthermalSimulation:
         local_steps, total_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=0)
         self.log_global(0, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
         
+        prev_stress_val = sig_macro_curr[stress_drop_component]
+        
         if vtk_mode == "global":
              fname = os.path.join(self.output_dir, "step_0000.vtu")
-             export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, match_matplotlib_orientation=True)
+             export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, 
+                          grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
 
         # ==========================
         # Global Loading Loop
         # ==========================
         for step in range(1, n_global_steps + 1):
+            self.current_step = step
             # Determine target strain for this step
             if use_loading_func:
                 # Update loading params for current step
@@ -355,10 +490,248 @@ class AthermalSimulation:
             # Record Global Envelope
             self.history_global.append((eps_macro_curr[0,0], sig_macro_curr[0,0]/1e9))
             
-            print(f"Step {step}: Cascade Steps={local_steps}, Flips={total_flips}, Sig_xx={sig_macro_curr[0,0]:.2e}")
+            # Current stress component
+            curr_stress_val = sig_macro_curr[stress_drop_component]
+
+            status_msg = f"Step {step}: Cascade Steps={local_steps}, Flips={total_flips}, Sig_xx={curr_stress_val/1e9:.2f} GPa"
+
+            # Checkpoint Logic
+            if checkpoint_interval and step % checkpoint_interval == 0:
+                if keep_checkpoints:
+                    cp_name = f"{checkpoint_path}_{step:06d}.h5"
+                else:
+                    cp_name = f"{checkpoint_path}.h5"
+                self.save_checkpoint(cp_name)
+
+            # Stress Drop Detection Logic
+            if stop_on_stress_drop is not None and not stop_drop_triggered:
+                if abs(prev_stress_val) > 1e-6:
+                    drop_frac = (prev_stress_val - curr_stress_val) / prev_stress_val
+                else:
+                    drop_frac = 0.0
+                
+                if drop_frac > stop_on_stress_drop:
+                    print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
+                    stop_drop_triggered = True
+                    status_msg += " [SB DETECTED]"
+            
+            prev_stress_val = curr_stress_val
+            
+            print(status_msg)
 
             if vtk_mode == "global":
                  fname = os.path.join(self.output_dir, f"step_{step:04d}.vtu")
-                 export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, match_matplotlib_orientation=True)
+                 export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, 
+                               grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
+
+            # Stop Handling
+            if stop_drop_triggered:
+                if stop_countdown > 0:
+                    stop_countdown -= 1
+                else:
+                    print(f"Stopping criteria: {stop_post_drop_steps} steps after detection.")
+                    break
 
         print("Simulation Complete.")
+
+    def _apply_strain_increment(self, eps_inc):
+        """
+        Apply homogeneous strain increment to all fields.
+        
+        Parameters
+        ----------
+        eps_inc : np.ndarray
+            3x3 strain increment tensor
+        """
+        # Update macroscopic strain state
+        self.eps_macro += eps_inc
+        
+        # Update fields and Sync Voxel objects (Crucial for find_unstable)
+        self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+            self.grid, self.eps_macro, self.E, self.nu, 
+            pixel=self.pixel, **self.solver_args
+        )
+
+    def run_mixed(self, n_global_steps, strain_rate, component=(0,0), 
+                  stress_targets=None,
+                  mixed_tol=1e-4, mixed_max_iter=10,
+                  vtk_mode="global",
+                  checkpoint_interval=None, checkpoint_path=None, keep_checkpoints=False,
+                  stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0):
+        """
+        Run simulation with mixed boundary conditions.
+        Drives strictly one strain component, while relaxing others to satisfy stress targets.
+        
+        Parameters
+        ----------
+        n_global_steps : int
+            Number of steps
+        strain_rate : float
+            Strain increment per step for the driven component
+        component : tuple
+            Index of driven component, e.g. (0,0) for eps_xx
+        stress_targets : dict, optional
+            Target stress values for relaxed components.
+            Default: All non-driven diagonal components target 0.0 (uniaxial tension).
+            Format: {(1,1): 0.0, (2,2): 0.0}
+        mixed_tol : float
+            Tolerance for stress convergence (Pa)
+        mixed_max_iter : int
+            Maximum iterations for stress relaxation per step
+        vtk_mode : str
+            VTK output mode
+        checkpoint_interval : int, optional
+            Save checkpoint every N steps
+        checkpoint_path : str, optional
+            Base path for checkpoints
+        keep_checkpoints : bool
+            Save unique files if True
+        stop_on_stress_drop : float, optional
+            Stop if stress drops by this fraction
+        stress_drop_component : tuple
+            Which stress component to check
+        stop_post_drop_steps : int
+            Steps to continue after drop
+        """
+        if stress_targets is None:
+            # Default for uniaxial x-tension: relax yy and zz to zero
+            stress_targets = {}
+            if component == (0,0):
+                stress_targets[(1,1)] = 0.0
+                stress_targets[(2,2)] = 0.0
+        
+        self.vtk_mode = vtk_mode # Set for _run_cascade usage
+        self.mode_generator = getattr(self, 'mode_generator', stz_catalog_glass)
+        
+        # Checkpoint setup
+        if checkpoint_interval is not None and checkpoint_path is None:
+            checkpoint_path = os.path.join(self.output_dir, "checkpoint")
+
+        # Log setup
+        self.loading_func_name = "mixed_control"
+        self.loading_params = {
+            "rate": strain_rate, 
+            "comp": component,
+            "targets": {str(k): v for k,v in stress_targets.items()}
+        }
+        
+        print(f"Starting AQS Mixed Simulation: {n_global_steps} steps")
+        print(f"Driving component {component} with rate {strain_rate}")
+        print(f"Relaxing components: {list(stress_targets.keys())}")
+        
+        # Compliance approximation for correction (isotropic)
+        E_avg = self.E.mean()
+        nu_avg = self.nu.mean()
+        
+        def get_correction(sigma_err):
+            tr_sig = np.trace(sigma_err)
+            return (sigma_err - nu_avg * tr_sig * np.eye(3)) / E_avg
+
+        # Stop logic state
+        stop_drop_triggered = False
+        stop_countdown = stop_post_drop_steps
+        prev_stress_val = 0.0
+
+        # Ensure Step 0 is relaxed
+        local_steps, total_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=0)
+        self.log_global(0, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
+        
+        prev_stress_val = sig_macro_curr[stress_drop_component]
+        
+        if vtk_mode == "global":
+             fname = os.path.join(self.output_dir, "step_0000.vtu")
+             export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, 
+                          grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
+
+        for step in range(1, n_global_steps + 1):
+            self.current_step = step
+            
+            # 1. Apply Driving Strain
+            eps_inc = np.zeros((3,3))
+            eps_inc[component] = strain_rate
+            self._apply_strain_increment(eps_inc)
+            
+            # 2. Iterative Relaxation Loop
+            iteration_flips = 0
+            iteration_steps = 0
+            converged = False
+            
+            for it in range(mixed_max_iter):
+                # a. Settle system (Plasticity)
+                l_steps, t_flips, eps_M, sig_M = self._run_cascade(global_step=step)
+                iteration_flips += t_flips
+                iteration_steps += l_steps
+                
+                # b. Check Stress Targets
+                stress_err_tensor = np.zeros((3,3))
+                max_err = 0.0
+                
+                for idx, target in stress_targets.items():
+                    err = target - sig_M[idx]
+                    stress_err_tensor[idx] = err
+                    max_err = max(max_err, abs(err))
+                
+                if max_err < mixed_tol:
+                    converged = True
+                    break
+                
+                # c. Apply Correction (Elasticity)
+                # Compute strain correction to reduce stress error
+                eps_corr = get_correction(stress_err_tensor)
+                
+                # Enforce: Do NOT change the driven component!
+                eps_corr[component] = 0.0
+                
+                # Apply correction
+                self._apply_strain_increment(eps_corr)
+            
+            if not converged:
+                print(f"Warning: Mixed control did not converge at step {step} (Max Err: {max_err:.2e})")
+
+            # Final values
+            eps_macro_curr = self.eps_field.mean(axis=(0,1,2))
+            sig_macro_curr = self.sig_field.mean(axis=(0,1,2))
+
+            # Log
+            self.log_global(step, eps_macro_curr, sig_macro_curr, iteration_steps, iteration_flips)
+            self.history_global.append((eps_macro_curr[0,0], sig_macro_curr[0,0]/1e9))
+            
+            curr_stress_val = sig_macro_curr[stress_drop_component]
+            status_msg = f"Step {step}: Cascade Steps={iteration_steps}, Flips={iteration_flips}, Sig_xx={curr_stress_val/1e9:.2f} GPa"
+
+            # Checkpoint Logic
+            if checkpoint_interval and step % checkpoint_interval == 0:
+                if keep_checkpoints:
+                    cp_name = f"{checkpoint_path}_{step:06d}.h5"
+                else:
+                    cp_name = f"{checkpoint_path}.h5"
+                self.save_checkpoint(cp_name)
+
+            # Stress Drop Detection Logic
+            if stop_on_stress_drop is not None and not stop_drop_triggered:
+                if abs(prev_stress_val) > 1e-6:
+                    drop_frac = (prev_stress_val - curr_stress_val) / prev_stress_val
+                else:
+                    drop_frac = 0.0
+                
+                if drop_frac > stop_on_stress_drop:
+                    print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
+                    stop_drop_triggered = True
+                    status_msg += " [SB DETECTED]"
+            
+            prev_stress_val = curr_stress_val
+            print(status_msg)
+
+            if vtk_mode == "global":
+                 fname = os.path.join(self.output_dir, f"step_{step:04d}.vtu")
+                 export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, 
+                               grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
+
+            if stop_drop_triggered:
+                if stop_countdown > 0:
+                    stop_countdown -= 1
+                else:
+                    print(f"Stopping criteria: {stop_post_drop_steps} steps after detection.")
+                    break
+
+        print("Mixed Simulation Complete.")

@@ -12,7 +12,7 @@ class Voxel:
         # initial random activation energies
         if barrier_generator is None:
              # Default fallback if not specified: mean=1.0, std=0.25
-             self.Q0 = np.random.normal(loc=1.0, scale=0.25, size=M)
+             self.Q0 = np.random.normal(loc=2.0, scale=0.6, size=M)
         else:
              self.Q0 = barrier_generator(M)
         # strain tensors
@@ -44,6 +44,6 @@ class Voxel:
 
     def reset_barriers(self, barrier_generator=None):
         if barrier_generator is None:
-             self.Q0 = np.random.normal(loc=1.0, scale=0.25, size=self.M)
+             self.Q0 = np.random.normal(loc=2.0, scale=0.6, size=self.M)
         else:
              self.Q0 = barrier_generator(self.M)

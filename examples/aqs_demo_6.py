@@ -1,10 +1,13 @@
 import numpy as np
 import os
 import shutil
-from mgkmc import AthermalSimulation
-from mgkmc.elasticity_helpers import get_uniaxial_stress_x
+from mgkmc import AthermalSimulation, generate_correlated_field
 
 def main():
+    print("=" * 60)
+    print("AQS DEMO 5: Large System Mixed Boundary Condition (Checkpoints + Shear Band)")
+    print("=" * 60)
+
     # ----------------------------------------------------
     # 1. Setup Parameters
     # ----------------------------------------------------
@@ -12,30 +15,36 @@ def main():
     np.random.seed(SEED)
     print(f"Random seed set to {SEED}")
 
-    nx, ny, nz = 128,128, 1
+    # System Size (Matching demo 4)
+    nx, ny, nz = 128, 128, 1
     pixel = 0.7
     M = 20
     gamma0 = 0.14
     
-    # Material properties (Homogeneous for this demo)
-    # E in GPa, nu is dimensionless
-    E = np.full((nx, ny, nz), 70.0)  # 70 GPa
-    nu = np.full((nx, ny, nz), 0.3)
+    # Material properties (Homogeneous)
+    E = generate_correlated_field(
+        shape=(nx, ny, nz),
+        mean=70,
+        std=70*0.1,
+        corr=2,
+        seed=SEED,
+        visualize=True
+    )
+    nu = 0.3 * np.ones_like(E)
     
     # ----------------------------------------------------
     # 2. Configuration for Experimentation
     # ----------------------------------------------------
-    # Change these values to test different physics!
     
     # Softening Configuration
     ENABLE_SOFTENING = True 
-    SOFTENING_SCHEME = "directional"  # Options: "isotropic", "directional"
+    SOFTENING_SCHEME = "directional" 
     SOFTENING_PARAMS = {"jp": 11, "jt": 33}
-    SOFTENING_CAP = -np.log(0.4) # Limit on g_p. Set to None for unlimited.
+    SOFTENING_CAP = -np.log(0.4) 
     
     # Simulation Control
-    DEBUG_FIRST_FLIP = False     # Set True to see details of the first instability
-    OUTPUT_DIR = "aqs_demo_output_uniaxial_128_new_2000_log(0.4)_newtry"
+    DEBUG_FIRST_FLIP = False
+    OUTPUT_DIR = "aqs_demo_6_mixed_checkpoint_shearband_hetero"
 
     # ----------------------------------------------------
     # 3. Custom Barrier Generator
@@ -61,7 +70,6 @@ def main():
         nu_field=nu,
         pixel=pixel,
         barrier_generator=my_barrier_generator,
-        # Default random mode generator is used if not specified
         output_dir=OUTPUT_DIR,
         
         # Softening Physics 
@@ -71,48 +79,56 @@ def main():
         softening_cap=SOFTENING_CAP,
         
         # Solver & Debugging
-        solver_args=None, # Default: {"max_iter": 200, "tol": 1e-6}
+        solver_args=None,
         debug_first_flip=DEBUG_FIRST_FLIP
     )
 
     # ----------------------------------------------------
-    # 5. Define Loading Protocol - UNIAXIAL TENSION
+    # 5. Run Mixed Simulation
     # ----------------------------------------------------
-    # Uniaxial tension: sigma_yy = sigma_zz = 0
-    eps_target = 0.20  # 10% strain
-    n_steps = 2000
+    # Uniaxial Tension: Drive X, Relax Y and Z to 0.0 stress
     
-    # ----------------------------------------------------
-    # 6. Run
-    # ----------------------------------------------------
+    eps_target = 0.14  # 14% strain
+    n_steps = 1400
+    strain_rate = eps_target / n_steps
+    
     # Options for vtk_mode: "global", "detailed", None
-    sim.run(
-        n_steps, 
-        vtk_mode="global",
-        loading_func=get_uniaxial_stress_x,
-        loading_params={
-            "eps_xx": eps_target,
-            "E": E.mean(),
-            "nu": nu.mean(),
-        }
+    # Using "global" to see evolution
+    
+    # NEW FEATURE CONFIGURATION
+    CHECKPOINT_INTERVAL = 1
+    KEEP_CHECKPOINTS = True
+    STOP_ON_STRESS_DROP = 0.20 # Stop if stress drops by 20%
+    STOP_POST_DROP_STEPS = 10  # Continue for 10 steps after detection
+    
+    sim.run_mixed(
+        n_global_steps=n_steps,
+        strain_rate=strain_rate,
+        component=(0,0), # Drive eps_xx
+        stress_targets={(1,1): 0.0, (2,2): 0.0}, # Target sig_yy=0, sig_zz=0
+        mixed_tol=1e6, # 1 MPa convergence tolerance
+        mixed_max_iter=10, 
+        vtk_mode=None,
+        
+        # New Arguments
+        checkpoint_interval=CHECKPOINT_INTERVAL,
+        keep_checkpoints=KEEP_CHECKPOINTS,
+        stop_on_stress_drop=STOP_ON_STRESS_DROP,
+        stress_drop_component=(0,0), # Monitor Sigma_xx
+        stop_post_drop_steps=STOP_POST_DROP_STEPS
     )
     
     print(f"\nDemo complete. Check '{OUTPUT_DIR}' for results.")
-    print(f"  - global_log.txt")
-    print(f"  - detailed_cascade.txt")
-    print(f"  - VTK files")
 
     # ----------------------------------------------------
-    # 7. Plot Stress-Strain Curves
+    # 6. Plot Stress-Strain Curves (Robust)
     # ----------------------------------------------------
     try:
         import matplotlib.pyplot as plt
         
-        # Data
         hist_global = np.array(sim.history_global)
         hist_detailed = np.array(sim.history_detailed)
         
-        # Plot 1: Standard AQS (Combined)
         plt.figure(figsize=(10, 6))
         
         if len(hist_detailed) > 0:
@@ -122,9 +138,9 @@ def main():
         if len(hist_global) > 0:
             plt.plot(hist_global[:,0]*100, hist_global[:,1], 'b-o', label='Global Equilibrium', alpha=0.9, markersize=4)
             
-        plt.xlabel('Strain $\\epsilon_{xx}$ (%)')
-        plt.ylabel('Stress $\\sigma_{xx}$ (GPa)')
-        plt.title(f'Uniaxial Tension (Softening: {SOFTENING_SCHEME if ENABLE_SOFTENING else "OFF"})')
+        plt.xlabel(r'Strain $\epsilon_{xx}$ (%)')
+        plt.ylabel(r'Stress $\sigma_{xx}$ (GPa)')
+        plt.title(f'Mixed Uniaxial Tension (Softening: {SOFTENING_SCHEME if ENABLE_SOFTENING else "OFF"})\nCheckpoints={CHECKPOINT_INTERVAL}, StopCheck={STOP_ON_STRESS_DROP*100}%')
         plt.grid(True)
         plt.legend()
         plt.tight_layout()

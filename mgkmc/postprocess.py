@@ -110,12 +110,29 @@ def reconstruct_displacement_element_centered(eps, pixel=1.0):
 
 
 def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
+                  grid=None, include_plastic=True,
                   match_matplotlib_orientation=False):
     """
     Export voxel-based FFT results to VTK.
 
     Parameters
     ----------
+    filename : str
+        Output VTK filename
+    eps : np.ndarray (nx, ny, nz, 3, 3)
+        Total strain field
+    sig : np.ndarray (nx, ny, nz, 3, 3)
+        Stress field
+    E : np.ndarray (nx, ny, nz)
+        Young's modulus field
+    nu : np.ndarray (nx, ny, nz)
+        Poisson's ratio field
+    pixel : float
+        Voxel size
+    grid : np.ndarray, optional
+        Grid of Voxel objects for extracting plastic strain and softening data
+    include_plastic : bool
+        If True and grid is provided, include plastic strain and softening fields
     match_matplotlib_orientation : bool
         If True, the VTK view will look exactly like matplotlib imshow(origin='lower').
     """
@@ -155,12 +172,12 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
 
     cells = [("hexahedron", np.array(cells, int))]
 
- # ---- Von Mises stress ----
+    # ---- Von Mises stress ----
     tr_sig = np.trace(sig, axis1=3, axis2=4)[..., None, None]
     sig_dev = sig - np.eye(3)[None,None,None,:,:] * tr_sig/3
     sig_vm = np.sqrt(1.5 * np.sum(sig_dev**2, axis=(3,4)))
 
-    # ---- Von Mises strain ----
+    # ---- Von Mises strain (total) ----
     tr_eps = np.trace(eps, axis1=3, axis2=4)[..., None, None]
     eps_dev = eps - np.eye(3)[None,None,None,:,:] * tr_eps/3
     eps_vm = np.sqrt((2/3) * np.sum(eps_dev**2, axis=(3,4)))
@@ -206,6 +223,51 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         "sig_vm"  : [sig_vm.ravel(order="C")],
         "eps_vm"  : [eps_vm.ravel(order="C")],
     }
+    
+    # ---------------------------
+    # Add plastic strain and softening data if grid is provided
+    # ---------------------------
+    if grid is not None and include_plastic:
+        # Extract plastic strain field
+        eps_plastic = np.zeros((nx, ny, nz, 3, 3))
+        g_p = np.zeros((nx, ny, nz))
+        g_t = np.zeros((nx, ny, nz))
+        flip_counts = np.zeros((nx, ny, nz))
+        Q0_mean = np.zeros((nx, ny, nz))
+        
+        for i in range(nx):
+            for j in range(ny):
+                for k in range(nz):
+                    voxel = grid[i, j, k]
+                    eps_plastic[i, j, k] = voxel.eps_plastic
+                    g_p[i, j, k] = voxel.g_p
+                    g_t[i, j, k] = voxel.g_t
+                    flip_counts[i, j, k] = voxel.flip_count_total
+                    Q0_mean[i, j, k] = voxel.Q0.mean()
+        
+        # Plastic strain components
+        cell_data["eps_plastic_xx"] = [eps_plastic[...,0,0].ravel(order="C")]
+        cell_data["eps_plastic_yy"] = [eps_plastic[...,1,1].ravel(order="C")]
+        cell_data["eps_plastic_zz"] = [eps_plastic[...,2,2].ravel(order="C")]
+        cell_data["eps_plastic_xy"] = [eps_plastic[...,0,1].ravel(order="C")]
+        cell_data["eps_plastic_xz"] = [eps_plastic[...,0,2].ravel(order="C")]
+        cell_data["eps_plastic_yz"] = [eps_plastic[...,1,2].ravel(order="C")]
+        
+        # Von Mises plastic strain
+        tr_eps_p = np.trace(eps_plastic, axis1=3, axis2=4)[..., None, None]
+        eps_p_dev = eps_plastic - np.eye(3)[None,None,None,:,:] * tr_eps_p/3
+        eps_plastic_vm = np.sqrt((2/3) * np.sum(eps_p_dev**2, axis=(3,4)))
+        cell_data["eps_plastic_vm"] = [eps_plastic_vm.ravel(order="C")]
+        
+        # Softening parameters
+        cell_data["g_p"] = [g_p.ravel(order="C")]
+        cell_data["g_t"] = [g_t.ravel(order="C")]
+        
+        # Flip count
+        cell_data["flip_count"] = [flip_counts.ravel(order="C")]
+        
+        # Mean barrier height
+        cell_data["Q0_mean"] = [Q0_mean.ravel(order="C")]
 
     # ---------------------------
     # 6. Optional displacement
@@ -224,6 +286,7 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
     )
     mesh.write(filename)
     #print(f"VTK export complete: {filename}")
+
 
 
 def export_simulation_vtk(
