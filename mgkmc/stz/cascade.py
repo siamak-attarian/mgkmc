@@ -1,7 +1,6 @@
 import numpy as np
 from .barriers import compute_barrier
 from .softening import update_softening
-from .update_fft import update_stress_fft
 
 def apply_flip(voxel, mode_idx, jp=10, jt=30, g_max=None, current_time=0.0):
     gamma = voxel.catalog[mode_idx]
@@ -43,41 +42,3 @@ def find_unstable(grid, volume, softening_scheme="isotropic", debug=False, debug
         print(f"[DEBUG] Total unstable voxels: {len(unstable)}")
     
     return unstable
-
-def cascade_step(grid, eps_macro, E, nu,
-                 volume, pixel,
-                 generation_function, solver_args, current_time=0.0, tau=np.inf):
-
-    unstable = find_unstable(grid, volume, threshold=solver_args.get("threshold", 0.0),
-                             current_time=current_time, tau=tau)
-    if not unstable:
-        return False
-
-    for x,y,z,m in unstable:
-        voxel = grid[x,y,z]
-
-        # update + softening
-        apply_flip(voxel, m, current_time=current_time)
-
-        voxel.catalog = generation_function(voxel.M)
-
-    update_stress_fft(grid, eps_macro, E, nu, pixel, **solver_args)
-    return True
-
-
-def run_athermal_cascade(grid, eps_macro, E, nu,
-                         volume, pixel,
-                         generation_function, solver_args, current_time=0.0, tau=np.inf):
-
-    update_stress_fft(grid, eps_macro, E, nu, pixel, **solver_args)
-
-    local_step = 0
-    while cascade_step(
-        grid, eps_macro, E, nu,
-        volume, pixel,
-        generation_function, solver_args,
-        current_time=current_time, tau=tau
-    ):
-        local_step += 1
-
-    return local_step

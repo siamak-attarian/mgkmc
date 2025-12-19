@@ -147,5 +147,4 @@ def select_event(rates, total_rate):
         
     # Deterministic Mean Residence Time (1/Rate)
     dt_kmc = 1.0 / total_rate
-    print('Total rate:', total_rate)
     return idx, dt_kmc

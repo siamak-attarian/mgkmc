@@ -4,7 +4,7 @@ import shutil
 import mgkmc
 print(f"DEBUG: mgkmc location: {mgkmc.__file__}")
 from mgkmc import AthermalSimulation
-from mgkmc.elasticity_helpers import get_uniaxial_stress_x
+from mgkmc.elasticity import get_uniaxial_stress_x
 
 def test_features():
     print("TESTING NEW CHECKPOINT AND DETECTION FEATURES")

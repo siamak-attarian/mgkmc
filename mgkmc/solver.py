@@ -117,7 +117,7 @@ def run_simulation(
     E, nu : np.ndarray
         3D material property fields.
     loading_func : callable
-        Function that returns a 3x3 strain tensor (e.g. from mgkmc.elasticity_helpers).
+        Function that returns a 3x3 strain tensor (e.g. from mgkmc.elasticity).
     loading_params : dict
         Arguments to pass to `loading_func`.
     n_steps : int

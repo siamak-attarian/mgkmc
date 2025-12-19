@@ -9,7 +9,7 @@ Run with:
 
 import numpy as np
 from mgkmc import generate_correlated_field, run_simulation, get_uniaxial_stress_x
-from mgkmc.plotting import plot_fields
+from mgkmc.analysis import plot_fields
 
 
 def main():

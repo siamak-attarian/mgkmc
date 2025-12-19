@@ -11,7 +11,7 @@ This script shows how to:
 
 import numpy as np
 import os
-from mgkmc.postprocess_history import (
+from mgkmc.analysis import (
     extract_history,
     analyze_cascades,
     extract_stress_strain_curves,

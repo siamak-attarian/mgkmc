@@ -42,7 +42,7 @@ def main():
 
     # Thermal Parameters
     TEMPERATURE = 600.0 # Kelvin
-    PHYSICAL_STRAIN_RATE = 1e9 # 1/s (Controls KMC vs Elastic timescale)
+    PHYSICAL_STRAIN_RATE = 1e5 # 1/s (Controls KMC vs Elastic timescale)
 
     # ----------------------------------------------------
     # 3. Custom Barrier Generator

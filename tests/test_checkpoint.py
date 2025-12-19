@@ -3,7 +3,7 @@ import numpy as np
 import os
 import shutil
 from mgkmc import AthermalSimulation
-from mgkmc.elasticity_helpers import get_uniaxial_stress_x
+from mgkmc.elasticity import get_uniaxial_stress_x
 
 # Setup
 np.random.seed(42)

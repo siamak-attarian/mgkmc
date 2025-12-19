@@ -2,7 +2,7 @@
 Quick test to verify get_uniaxial_stress_x is being used correctly in AQS
 """
 import numpy as np
-from mgkmc.elasticity_helpers import get_uniaxial_stress_x
+from mgkmc.elasticity import get_uniaxial_stress_x
 
 # Test parameters
 eps_xx = 0.001

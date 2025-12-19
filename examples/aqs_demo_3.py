@@ -7,7 +7,7 @@ import os
 import shutil
 import matplotlib.pyplot as plt
 from mgkmc import AthermalSimulation
-from mgkmc.elasticity_helpers import get_uniaxial_stress_x
+from mgkmc.elasticity import get_uniaxial_stress_x
 
 def main():
     print("=" * 60)
@@ -130,7 +130,7 @@ def main():
     # history_global ONLY accumulated (eps_xx, sig_xx). 
     # We need to extract full history from the logs to see Sigma_YY and Sigma_ZZ.
     
-    from mgkmc.postprocess_history import extract_history
+    from mgkmc.analysis import extract_history
     
     data_pure = extract_history(OUTPUT_DIR_PURE)['global']
     data_mixed = extract_history(OUTPUT_DIR_MIXED)['global']

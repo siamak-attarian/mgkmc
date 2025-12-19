@@ -6,9 +6,10 @@ from mgkmc.stz.cascade import find_unstable, apply_flip
 from mgkmc.stz.update_fft import update_stress_fft, update_stress_fft_full
 from mgkmc.elasticity import stress_from_strain
 from mgkmc.stz.catalog import stz_catalog_glass
-from mgkmc.postprocess import export_to_vtk
+from mgkmc.analysis import export_to_vtk
 from mgkmc.stz.kmc import compute_rates, select_event
 from mgkmc.stz.barriers import compute_barrier
+from mgkmc.checkpoint import save_checkpoint, load_checkpoint
 
 class AthermalSimulation:
     def __init__(self, 
@@ -164,7 +165,6 @@ class AthermalSimulation:
         filename : str
             Path to checkpoint file (HDF5 format)
         """
-        from mgkmc.checkpoint import save_checkpoint
         save_checkpoint(self, filename)
     
     def export_vtk(self, filename):
@@ -176,7 +176,6 @@ class AthermalSimulation:
         filename : str
             Output path for VTK file.
         """
-        from mgkmc.postprocess import export_to_vtk
         export_to_vtk(filename, self.eps_field, self.sig_field, self.E, self.nu, self.pixel,
                       grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
     
@@ -195,7 +194,6 @@ class AthermalSimulation:
         sim : AthermalSimulation
             Reconstructed simulation instance
         """
-        from mgkmc.checkpoint import load_checkpoint
         return load_checkpoint(filename)
     
     def get_plastic_strain_field(self):
@@ -238,12 +236,12 @@ class AthermalSimulation:
         # Global Log Header
         # Define widths for alignment
         # Step: 6, Floats: 15, Ints: 14
-        header_fmt = "{:<6} " + " ".join(["{:>15}"]*12) + " {:>14} {:>14}"
+        header_fmt = "{:<10} {:<12} {:<10} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
         headers = [
-            "Step", 
+            "GlobalStep", "ElasticStep", "KMCStep",
             "Eps_xx", "Eps_yy", "Eps_zz", "Eps_xy", "Eps_xz", "Eps_yz",
-            "Sig_xx", "Sig_yy", "Sig_zz", "Sig_xy", "Sig_xz", "Sig_yz",
-            "CascadeSteps", "TotalFlips"
+            "Sig_xx(GPa)", "Sig_yy(GPa)", "Sig_zz(GPa)", "Sig_xy(GPa)", "Sig_xz(GPa)", "Sig_yz(GPa)",
+            "CascadeSteps", "TotalCascadeFlips"
         ]
         
         with open(self.global_log_path, "w") as f:
@@ -257,7 +255,7 @@ class AthermalSimulation:
             ]
             f.write("\t".join(headers) + "\n")
 
-    def log_global(self, step, eps, sig, cascade_steps, total_flips):
+    def log_global(self, global_step, elastic_step, kmc_step, eps, sig, cascade_steps, total_flips):
         # eps, sig here are MACROSCOPIC 3x3
         # Flatten tensors for logging
         # Tensor order: xx, xy, xz, yx, yy, yz, zx, zy, zz
@@ -265,11 +263,11 @@ class AthermalSimulation:
         indices = [(0,0), (1,1), (2,2), (0,1), (0,2), (1,2)]
         
         # Consistent formatting
-        line_fmt = "{:<6d} " + " ".join(["{:>15.6e}"]*12) + " {:>14d} {:>14d}"
+        line_fmt = "{:<10d} {:<12d} {:<10d} " + " ".join(["{:<15.6e}"]*12) + " {:<14d} {:<17d}"
         
-        values = [step]
+        values = [global_step, elastic_step, kmc_step]
         values.extend([eps[i,j] for i,j in indices])
-        values.extend([sig[i,j] for i,j in indices])
+        values.extend([sig[i,j]/1e9 for i,j in indices])
         values.append(cascade_steps)
         values.append(total_flips)
         
@@ -294,15 +292,26 @@ class AthermalSimulation:
         with open(self.cascade_log_path, "a") as f:
             f.write("\t".join(row) + "\n")
 
-    def log_kmc(self, global_step, kmc_step, dt, event_idx):
+    def log_kmc(self, global_step, kmc_step, dt_kmc, dt_elastic, event_idx, barrier_ev):
         path = os.path.join(self.output_dir, "kmc_log.txt")
+        # Define format with fixed widths aligning left
+        fmt_header = "{:<10} {:<10} {:<15} {:<15} {:<15} {:<20} {:<15}\n"
+        fmt_data   = "{:<10d} {:<10d} {:<15.6e} {:<15.6e} {:<15.6e} {:<20} {:<15.6f}\n"
+        
         if not os.path.exists(path):
             with open(path, "w") as f:
-                f.write("GlobalStep\tKMCStep\tDt\tEvent(x,y,z,m)\n")
+                f.write(fmt_header.format("GlobalStep", "KMCStep", "DtElastic", "DtKMC", "e^(-DtE/DtK)", "Event(x,y,z,m)", "Barrier(eV)"))
         
+        # Calculate ratio safely
+        if dt_kmc > 0:
+             ratio = np.exp(-dt_elastic / dt_kmc)
+        else:
+             ratio = 0.0
+
         x, y, z, m = event_idx
+        event_str = f"({x},{y},{z},{m})"
         with open(path, "a") as f:
-            f.write(f"{global_step}\t{kmc_step}\t{dt:.6e}\t({x},{y},{z},{m})\n")
+            f.write(fmt_data.format(global_step, kmc_step, dt_elastic, dt_kmc, ratio, event_str, barrier_ev))
 
     def update_barriers(self):
         """Re-compute barriers for all voxels given current time (updates decay)."""
@@ -405,12 +414,12 @@ class AthermalSimulation:
 
             local_step += 1
             
-        return local_steps if 'local_steps' in locals() else local_step, total_flips, eps_macro_out, sig_macro_out
+        return local_step, total_flips, eps_macro_out, sig_macro_out
 
     def run(self, n_global_steps, strain_increment_tensor=None, vtk_mode="global", 
             loading_func=None, loading_params=None,
             checkpoint_interval=None, checkpoint_path=None, keep_checkpoints=False,
-            stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0,
+            stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0, ignore_drop_steps=10,
             kmc_mode="accumulate"):
         """
         Run Simulation (KMC or AQS).
@@ -432,6 +441,8 @@ class AthermalSimulation:
                                     Time advances correctly. 'step' counts Elastic increments.
             "on_demand": C-style. Flattened loop. One iteration is either one KMC event OR one Elastic step.
                          'step' counts iterations (Events). Stops when target strain/steps reached.
+        ignore_drop_steps : int
+             Number of initial global steps to ignore for stress drop detection. Default 10.
         """
         print("Starting Simulation...")
         self.vtk_mode = vtk_mode
@@ -494,7 +505,7 @@ class AthermalSimulation:
         )
         
         local_steps, total_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=0)
-        self.log_global(0, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
+        self.log_global(0, 0, 0, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
         
         prev_stress_val = sig_macro_curr[stress_drop_component]
         
@@ -508,6 +519,7 @@ class AthermalSimulation:
         # ==========================
         step = 1
         kmc_substeps = 0
+        total_kmc_steps = 0
         elastic_steps_done = 0
         
         while elastic_steps_done < n_global_steps:
@@ -559,14 +571,18 @@ class AthermalSimulation:
                     x, y, z, m = indices[idx]
                     voxel = self.grid[x,y,z]
                     
+                    # Capture barrier before flip
+                    barrier_val = voxel.Q[m]
+
                     # Apply Flip
                     apply_flip(voxel, m, jp=self.jp, jt=self.jt, g_max=self.softening_cap, current_time=self.time)
                     voxel.set_catalog(self.mode_generator(self.M, self.gamma0))
                     
                     # Log KMC
-                    self.log_kmc(step, kmc_substeps, dt_kmc, (x,y,z,m))
+                    self.log_kmc(step, total_kmc_steps, dt_kmc, dt_elastic, (x,y,z,m), barrier_val)
                     self.time += dt_kmc
                     kmc_substeps += 1
+                    total_kmc_steps += 1
                     
                     # Update Stress Logic
                     # We just flipped one voxel. This changes eps_plastic.
@@ -580,10 +596,6 @@ class AthermalSimulation:
                         # C-Style: Break loop. One event = One step.
                         # Do NOT increment elastic steps.
                         break
-                    if kmc_mode == "on_demand":
-                         # C-Style: We break the loop here. ONE event is ONE step.
-                         # But we didn't do elastic loading, so elastic_steps_done does NOT increment.
-                         break
                     
                 else:
                     # ELASTIC EVENT
@@ -613,7 +625,9 @@ class AthermalSimulation:
             
             # Run Post-Elastic Cascade (Plastic Corrector)
             # This handles any instability caused by the elastic step
-            local_steps, total_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=step)
+            l_steps, t_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=step)
+            iteration_steps += l_steps
+            iteration_flips += t_flips
             
             # Log Global Step
             # For "on_demand", we log every step (even if just KMC), OR we log only on elastic?
@@ -623,7 +637,7 @@ class AthermalSimulation:
             # In "accumulate": Outer loop = 1 Elastic Step (many KMC).
             # In "on_demand": Outer loop = 1 Event (KMC or Elastic).
             
-            self.log_global(step, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
+            self.log_global(step, elastic_steps_done, total_kmc_steps, eps_macro_curr, sig_macro_curr, iteration_steps, iteration_flips)
             self.history_global.append((eps_macro_curr[0,0], sig_macro_curr[0,0]/1e9))
             
             curr_stress_val = sig_macro_curr[stress_drop_component]
@@ -649,15 +663,16 @@ class AthermalSimulation:
 
             # Stress Drop Detection Logic
             if stop_on_stress_drop is not None and not stop_drop_triggered:
-                if abs(prev_stress_val) > 1e-6:
-                    drop_frac = (prev_stress_val - curr_stress_val) / prev_stress_val
-                else:
-                    drop_frac = 0.0
-                
-                if drop_frac > stop_on_stress_drop:
-                    print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
-                    stop_drop_triggered = True
-                    status_msg += " [SB DETECTED]"
+                if step > ignore_drop_steps:
+                    if abs(prev_stress_val) > 1e-6:
+                        drop_frac = (prev_stress_val - curr_stress_val) / prev_stress_val
+                    else:
+                        drop_frac = 0.0
+                    
+                    if drop_frac > stop_on_stress_drop:
+                        print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
+                        stop_drop_triggered = True
+                        status_msg += " [SB DETECTED]"
             
             prev_stress_val = curr_stress_val
             
@@ -703,7 +718,7 @@ class AthermalSimulation:
                   mixed_tol=1e-4, mixed_max_iter=10,
                   vtk_mode="global",
                   checkpoint_interval=None, checkpoint_path=None, keep_checkpoints=False,
-                  stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0,
+                  stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0, ignore_drop_steps=10,
                   kmc_mode="accumulate"):
         """
         Run simulation with mixed boundary conditions (supports KMC).
@@ -741,6 +756,8 @@ class AthermalSimulation:
             Steps to continue after drop
         kmc_mode : str ("accumulate" or "on_demand")
             See run() docstring.
+        ignore_drop_steps : int
+             Number of initial global steps to ignore for stress drop detection. Default 10.
         """
         if stress_targets is None:
             # Default for uniaxial x-tension: relax yy and zz to zero
@@ -793,7 +810,7 @@ class AthermalSimulation:
 
         # Ensure Step 0 is relaxed
         local_steps, total_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=0)
-        self.log_global(0, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
+        self.log_global(0, 0, 0, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
         
         prev_stress_val = sig_macro_curr[stress_drop_component]
         
@@ -804,6 +821,7 @@ class AthermalSimulation:
 
         step = 1
         kmc_substeps = 0
+        total_kmc_steps = 0
         elastic_steps_done = 0
         
         while elastic_steps_done < n_global_steps:
@@ -819,6 +837,8 @@ class AthermalSimulation:
                                          threshold=self.stability_threshold)
                 if unstable:
                     l_steps, t_flips, _, _ = self._run_cascade(global_step=step)
+                    iteration_steps += l_steps
+                    iteration_flips += t_flips
                     continue
                 
                 # 2. Compute Rates
@@ -841,12 +861,16 @@ class AthermalSimulation:
                     x, y, z, m = indices[idx]
                     voxel = self.grid[x,y,z]
                     
+                    # Capture barrier before flip
+                    barrier_val = voxel.Q[m]
+                    
                     apply_flip(voxel, m, jp=self.jp, jt=self.jt, g_max=self.softening_cap)
                     voxel.set_catalog(self.mode_generator(self.M, self.gamma0))
                     
-                    self.log_kmc(step, kmc_substeps, dt_kmc, (x,y,z,m))
+                    self.log_kmc(step, total_kmc_steps, dt_kmc, dt_elastic, (x,y,z,m), barrier_val)
                     self.time += dt_kmc
                     kmc_substeps += 1
+                    total_kmc_steps += 1
                     
                     # Update Stress (without mixed relaxation)
                     self.eps_field, self.sig_field, eps_macro_curr, sig_macro_curr = update_stress_fft_full(
@@ -856,11 +880,6 @@ class AthermalSimulation:
                     
                     if kmc_mode == "on_demand":
                          break
-                    
-                    if kmc_mode == "on_demand":
-                        # C-Style: One event per step. Break inner loop.
-                        # Do NOT increment elastic_steps_done
-                        break
                 else:
                     # ELASTIC EVENT
                     self.time += dt_elastic
@@ -896,6 +915,7 @@ class AthermalSimulation:
                     if not converged:
                         print(f"Warning: Mixed control did not converge at step {step} (Max Err: {max_err:.2e})")
                     
+                    elastic_steps_done += 1
                     # Break decision loop to finalize step
                     break
             
@@ -908,7 +928,7 @@ class AthermalSimulation:
             # Log
             iteration_steps = locals().get('iteration_steps', 0)
             iteration_flips = locals().get('iteration_flips', 0)
-            self.log_global(step, eps_macro_curr, sig_macro_curr, iteration_steps, iteration_flips)
+            self.log_global(step, elastic_steps_done, total_kmc_steps, eps_macro_curr, sig_macro_curr, iteration_steps, iteration_flips)
             self.history_global.append((eps_macro_curr[0,0], sig_macro_curr[0,0]/1e9))
             
             curr_stress_val = sig_macro_curr[stress_drop_component]
@@ -925,15 +945,16 @@ class AthermalSimulation:
 
             # Stress Drop Detection Logic
             if stop_on_stress_drop is not None and not stop_drop_triggered:
-                if abs(prev_stress_val) > 1e-6:
-                    drop_frac = (prev_stress_val - curr_stress_val) / prev_stress_val
-                else:
-                    drop_frac = 0.0
-                
-                if drop_frac > stop_on_stress_drop:
-                    print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
-                    stop_drop_triggered = True
-                    status_msg += " [SB DETECTED]"
+                if step > ignore_drop_steps:
+                    if abs(prev_stress_val) > 1e-6:
+                        drop_frac = (prev_stress_val - curr_stress_val) / prev_stress_val
+                    else:
+                        drop_frac = 0.0
+                    
+                    if drop_frac > stop_on_stress_drop:
+                        print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
+                        stop_drop_triggered = True
+                        status_msg += " [SB DETECTED]"
             
             prev_stress_val = curr_stress_val
             print(status_msg)

@@ -5,7 +5,7 @@ This version adds timing measurements to each major operation.
 import numpy as np
 import time
 from mgkmc import AthermalSimulation
-from mgkmc.elasticity_helpers import get_uniaxial_stress_x
+from mgkmc.elasticity import get_uniaxial_stress_x
 
 # Monkey-patch the AQS run method to add timing
 import mgkmc.aqs
