@@ -33,6 +33,9 @@ class Voxel:
         self.flip_count_total = 0
         self.last_flip_global = -1
         self.last_flip_local  = -1
+        
+        # timestamp for transient softening decay
+        self.last_event_time = -np.inf
 
     def set_catalog(self, catalog):
         """Replace catalog modes."""

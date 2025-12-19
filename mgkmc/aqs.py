@@ -7,6 +7,8 @@ from mgkmc.stz.update_fft import update_stress_fft, update_stress_fft_full
 from mgkmc.elasticity import stress_from_strain
 from mgkmc.stz.catalog import stz_catalog_glass
 from mgkmc.postprocess import export_to_vtk
+from mgkmc.stz.kmc import compute_rates, select_event
+from mgkmc.stz.barriers import compute_barrier
 
 class AthermalSimulation:
     def __init__(self, 
@@ -22,9 +24,14 @@ class AthermalSimulation:
                  softening_scheme="isotropic", # "isotropic" or "directional"
                  softening_cap=0.51, # Default from C code: -log(0.6)
                  solver_args=None,
-                 debug_first_flip=False):
+                 debug_first_flip=False,
+                 temperature=0.0, # Kelvin
+                 strain_rate=1.0, # 1/s, used for KMC decision
+                 strain_rate_sensitivity=0.0, # 's' exponent
+                 stability_threshold=0.0 # eV, threshold for athermal instability
+                 ):
         """
-        Initialize Athermal Quasi-Static Simulation.
+        Initialize Athermal Quasi-Static Simulation (with Thermal extensions).
         
         Parameters
         ----------
@@ -52,6 +59,12 @@ class AthermalSimulation:
             Arguments for spectral solver
         debug_first_flip : bool
             Enable detailed diagnostics for first flip event
+        temperature : float
+            Temperature in Kelvin (default: 0.0)
+        strain_rate : float
+            Applied strain rate in 1/s (default: 1.0)
+        strain_rate_sensitivity : float
+            Sensitivity exponent for strain rate (default: 0.0)
         """
         
         self.nx, self.ny, self.nz = nx, ny, nz
@@ -64,6 +77,24 @@ class AthermalSimulation:
         self.first_flip_occurred = False
         self.softening_scheme = softening_scheme
         self.softening_cap = softening_cap
+
+        # KMC / Thermal Parameters
+        self.temperature = temperature
+        self.strain_rate = strain_rate
+        self.strain_rate_sensitivity = strain_rate_sensitivity
+        self.stability_threshold = stability_threshold
+        self.time = 0.0 # Simulation time in seconds
+        
+        # Softening Decay Time Constant (t_Temp)
+        # Defaults to inf (no decay) until temperature is set/run
+        self.tau = np.inf 
+        
+        # Softening Parameters (initialized to 0, will be set if softening_enabled)
+        self.jp = 0.0
+        self.jt = 0.0
+        
+        if self.temperature > 0:
+            print(f"Thermal KMC ENABLED: T={self.temperature}K, Rate={self.strain_rate}/s")
         
         # Softening parameters
         if softening_enabled:
@@ -263,6 +294,26 @@ class AthermalSimulation:
         with open(self.cascade_log_path, "a") as f:
             f.write("\t".join(row) + "\n")
 
+    def log_kmc(self, global_step, kmc_step, dt, event_idx):
+        path = os.path.join(self.output_dir, "kmc_log.txt")
+        if not os.path.exists(path):
+            with open(path, "w") as f:
+                f.write("GlobalStep\tKMCStep\tDt\tEvent(x,y,z,m)\n")
+        
+        x, y, z, m = event_idx
+        with open(path, "a") as f:
+            f.write(f"{global_step}\t{kmc_step}\t{dt:.6e}\t({x},{y},{z},{m})\n")
+
+    def update_barriers(self):
+        """Re-compute barriers for all voxels given current time (updates decay)."""
+        Nx, Ny, Nz = self.grid.shape
+        for x in range(Nx):
+            for y in range(Ny):
+                 for z in range(Nz):
+                      compute_barrier(self.grid[x,y,z], self.volume, 
+                                      softening_scheme=self.softening_scheme,
+                                      current_time=self.time, tau=self.tau)
+
     def _run_cascade(self, global_step):
         """
         Run the avalanche loop until stability.
@@ -283,18 +334,18 @@ class AthermalSimulation:
         # We'll rely on the update loop.
         
         # If we enter consistent, we have self.eps_field, self.sig_field correct.
-        # But we need eps_macro_out to return.
-        # Let's do a quick mean?
-        eps_macro_out = self.eps_field.mean(axis=(0,1,2))
-        sig_macro_out = self.sig_field.mean(axis=(0,1,2))
+        eps_macro_out = self.eps_macro.copy()
+        sig_macro_out = np.mean(self.sig_field, axis=(0,1,2))
+        
+        enable_debug = self.debug_first_flip and not self.first_flip_occurred
 
         while True:
-            # 1. Check for stability
-            # Enable debug for first flip event
-            enable_debug = self.debug_first_flip and not self.first_flip_occurred
+            # 1. Check stability (using decayed barriers)
             unstable = find_unstable(self.grid, self.volume, 
-                                     softening_scheme=self.softening_scheme, 
-                                     debug_first_flip=enable_debug)
+                                     softening_scheme=self.softening_scheme,
+                                     threshold=self.stability_threshold,
+                                     debug_first_flip=enable_debug,
+                                     current_time=self.time, tau=self.tau)
             
             if not unstable:
                 break
@@ -317,37 +368,27 @@ class AthermalSimulation:
             for x, y, z, m in unstable:
                 self.flip_event_history.append((global_step, local_step, x, y, z, m))
             
-            # Stop criteria: >20% of elements flipped
+            # Stop criteria: >80% of elements flipped
             n_elements = self.nx * self.ny * self.nz
             if total_flips > 0.8 * n_elements:
-                raise RuntimeError(f"Simulation stopped: More than 50% of elements flipped ({total_flips} > {0.5 * n_elements:.1f}) in a single cascade.")
+                raise RuntimeError(f"Simulation stopped: More than 80% of elements flipped ({total_flips} > {0.8 * n_elements:.1f}) in a single cascade.")
             
             
             for x, y, z, m in unstable:
                 voxel = self.grid[x,y,z]
-                # Update plastic strain & softening
-                apply_flip(voxel, m, jp=self.jp, jt=self.jt, g_max=self.softening_cap)
-                # Regenerate catalog for this voxel
-                # Note: Currently regenerating ALL modes for the voxel. 
-                # Ideally might only regenerate the used one? 
-                # But standard STZ usually renews the local config.
-                # using the flexible mode generator from init
-                # But we didn't save the generator function in self... 
-                # Wait, "generation_function" in old code was passed in.
-                # I should store it or just use the default logic?
-                # User asked for flexibility. I should probably store `mode_generator` in `__init__`.
-                # I'll fix this in the code below.
+                # Update plastic strain & softening (Propagate time)
+                apply_flip(voxel, m, jp=self.jp, jt=self.jt, g_max=self.softening_cap, current_time=self.time)
+                
+                # Renew catalog
                 if hasattr(self, 'mode_generator'):
                      voxel.set_catalog(self.mode_generator(self.M, self.gamma0))
                 else:
-                     # Fallback
                      voxel.set_catalog(stz_catalog_glass(self.M, self.gamma0))
                 
-                # Reform barriers (crucial for AQS stability)
+                # Reform barriers
                 voxel.reset_barriers(self.barrier_generator)
             
             # 4. Global Elastic Relax (FFT)
-            # Updates voxel.sigma and returns macro state (which we might overwrite later but needed for equilibrium)
             self.eps_field, self.sig_field, eps_macro_out, sig_macro_out = update_stress_fft_full(
                 self.grid, self.eps_macro, self.E, self.nu, 
                 pixel=self.pixel, **self.solver_args
@@ -356,7 +397,7 @@ class AthermalSimulation:
             # Record detailed history
             self.history_detailed.append((eps_macro_out[0,0], sig_macro_out[0,0]/1e9))
             
-            # Optional: Intermediate VTK for detailed local steps?
+            # Optional: Intermediate VTK
             if self.vtk_mode == "detailed":
                  fname = os.path.join(self.output_dir, f"step_{global_step:04d}_local_{local_step:04d}.vtu")
                  export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, 
@@ -364,42 +405,35 @@ class AthermalSimulation:
 
             local_step += 1
             
-        return local_step, total_flips, eps_macro_out, sig_macro_out
+        return local_steps if 'local_steps' in locals() else local_step, total_flips, eps_macro_out, sig_macro_out
 
     def run(self, n_global_steps, strain_increment_tensor=None, vtk_mode="global", 
             loading_func=None, loading_params=None,
             checkpoint_interval=None, checkpoint_path=None, keep_checkpoints=False,
-            stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0):
+            stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0,
+            kmc_mode="accumulate"):
         """
-        Run AQS simulation.
+        Run Simulation (KMC or AQS).
         
         Parameters
         ----------
         n_global_steps : int
-            Number of loading steps
+            Number of elastic loading steps
         strain_increment_tensor : np.ndarray (3,3), optional
-            Strain increment per step (for pure strain control)
+            Strain increment per ELastic step (for pure strain control)
         vtk_mode : str
             "global", "detailed", or None
         loading_func : callable, optional
-            Function that returns strain tensor given parameters (e.g., get_uniaxial_stress_x)
-            If provided, uses this instead of strain_increment_tensor
+            Function that returns strain tensor given parameters
         loading_params : dict, optional
-            Parameters for loading_func (e.g., {"eps_xx": 0.1, "E": E, "nu": nu})
-        checkpoint_interval : int, optional
-            Save checkpoint every N steps
-        checkpoint_path : str, optional
-            Base path for checkpoints
-        keep_checkpoints : bool
-            Save unique files if True
-        stop_on_stress_drop : float, optional
-            Stop if stress drops by this fraction
-        stress_drop_component : tuple
-            Which stress component to check
-        stop_post_drop_steps : int
-            Steps to continue after drop
+            Parameters for loading_func 
+        kmc_mode : str ("accumulate" or "on_demand")
+            "accumulate" (Default): Nested loop. Multiple KMC events can occur before one elastic step.
+                                    Time advances correctly. 'step' counts Elastic increments.
+            "on_demand": C-style. Flattened loop. One iteration is either one KMC event OR one Elastic step.
+                         'step' counts iterations (Events). Stops when target strain/steps reached.
         """
-        print("Starting AQS Simulation...")
+        print("Starting Simulation...")
         self.vtk_mode = vtk_mode
         self.mode_generator = getattr(self, 'mode_generator', stz_catalog_glass)
         
@@ -407,7 +441,7 @@ class AthermalSimulation:
         if checkpoint_interval is not None and checkpoint_path is None:
             checkpoint_path = os.path.join(self.output_dir, "checkpoint")
         
-        # Store loading configuration for checkpointing
+        # Store loading configuration
         if loading_func is not None:
             self.loading_func_name = loading_func.__name__ if hasattr(loading_func, '__name__') else str(loading_func)
             self.loading_params = loading_params
@@ -416,28 +450,41 @@ class AthermalSimulation:
             self.loading_func_name = None
             self.loading_params = None
             self.strain_increment_tensor = strain_increment_tensor
+            
+        # Determine dt_elastic (Time step for elastic loading)
+        # Assuming strain_increment_tensor[0,0] is the main driver
+        if self.strain_rate > 0 and strain_increment_tensor is not None:
+            # Estimate dt from eps_xx increment
+            d_eps = abs(strain_increment_tensor[0,0])
+            if d_eps == 0:
+                 d_eps = np.max(np.abs(strain_increment_tensor))
+            dt_elastic = d_eps / self.strain_rate
+        else:
+            # Fallback or Loading Func
+            # If loading func, we assume dt_elastic corresponds to (1 / n_steps * total_time)?
+            # We'll default to 1.0/strain_rate if logical, or just 1.0
+            dt_elastic = 1.0 / (self.strain_rate if self.strain_rate > 0 else 1.0)
+
+        print(f"Elastic Time Step: {dt_elastic:.4e} s (based on rate {self.strain_rate})")
 
         # Stop logic state
         stop_drop_triggered = False
         stop_countdown = stop_post_drop_steps
         prev_stress_val = 0.0
         
-        # Determine loading mode
+        # Loading Setup (Same as before)
         if loading_func is not None:
-            # Mixed BC mode: use loading function
             if loading_params is None:
                 raise ValueError("loading_params required when loading_func is provided")
             use_loading_func = True
-            # Extract target from params (assume eps_xx is the control parameter)
             eps_target = loading_params.get("eps_xx", 0.1)
         else:
-            # Pure strain control mode
             if strain_increment_tensor is None:
                 raise ValueError("Either strain_increment_tensor or loading_func must be provided")
             use_loading_func = False
 
         # ==========================
-        # Global Step 0: Initial Relaxation
+        # Step 0: Initial Relaxation
         # ==========================
         self.current_step = 0
         print("Step 0 (Initial Relaxation)...")
@@ -457,44 +504,141 @@ class AthermalSimulation:
                           grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
 
         # ==========================
-        # Global Loading Loop
+        # Main Loop (Hybrid KMC / Elastic)
         # ==========================
-        for step in range(1, n_global_steps + 1):
+        step = 1
+        kmc_substeps = 0
+        elastic_steps_done = 0
+        
+        while elastic_steps_done < n_global_steps:
+
             self.current_step = step
-            # Determine target strain for this step
-            if use_loading_func:
-                # Update loading params for current step
-                current_params = loading_params.copy()
-                current_params["eps_xx"] = eps_target * (step / n_global_steps)
-                target_eps = loading_func(**current_params)
-                self.eps_macro = target_eps
-            else:
-                # Apply strain increment
-                self.eps_macro += strain_increment_tensor
+            iteration_steps = 0
+            iteration_flips = 0
             
-            # Update Stress Field (Elastic Predictor)
-            self.eps_field, self.sig_field, eps_macro_curr, sig_macro_curr = update_stress_fft_full(
-                self.grid, self.eps_macro, self.E, self.nu, 
-                pixel=self.pixel, **self.solver_args
-            )
+            # KMC / Elastic Decision Loop
+            while True:
+                # 1. Check Athermal Stability first
+                # (Pass current_time so stability check accounts for decay too!)
+                unstable = find_unstable(self.grid, self.volume, 
+                                         softening_scheme=self.softening_scheme,
+                                         threshold=self.stability_threshold,
+                                         current_time=self.time, tau=self.tau)
+                if unstable:
+                    # Trigger Avalanche
+                    l_steps, t_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=step)
+                    iteration_steps += l_steps
+                    iteration_flips += t_flips
+                    # Time does NOT advance during avalanche (athermal)
+                    continue
+                
+                # 2. Update Barriers (Decay) & Compute KMC Rates
+                # Ensure Q is up to date with time decay
+                self.update_barriers()
+                
+                if self.temperature > 0:
+                    rates, indices, total_rate = compute_rates(
+                        self.grid, self.volume, self.temperature, 
+                        strain_rate_sensitivity=self.strain_rate_sensitivity,
+                        applied_strain_rate=self.strain_rate,
+                        current_time=self.time
+                    )
+                    idx, dt_kmc = select_event(rates, total_rate)
+                else:
+                    dt_kmc = float('inf')
+                    idx = None
+                
+                # 3. Decision (Probabilistic Hybrid)
+                # dt_kmc is now the Mean Residence Time (t_res = 1/R)
+                # Probability of thermal event in dt_elastic: P = 1 - exp(-dt_elastic / t_res)
+                # Equivalent check: eta > exp(-dt_elastic / t_res)
+                
+                trigger_threshold = np.exp(-dt_elastic / dt_kmc)
+                if self.temperature > 0 and np.random.uniform() > trigger_threshold:
+                    # THERMAL EVENT
+                    x, y, z, m = indices[idx]
+                    voxel = self.grid[x,y,z]
+                    
+                    # Apply Flip
+                    apply_flip(voxel, m, jp=self.jp, jt=self.jt, g_max=self.softening_cap, current_time=self.time)
+                    voxel.set_catalog(self.mode_generator(self.M, self.gamma0))
+                    
+                    # Log KMC
+                    self.log_kmc(step, kmc_substeps, dt_kmc, (x,y,z,m))
+                    self.time += dt_kmc
+                    kmc_substeps += 1
+                    
+                    # Update Stress Logic
+                    # We just flipped one voxel. This changes eps_plastic.
+                    # We MUST update stress field to restore equilibrium and update Q for next step.
+                    self.eps_field, self.sig_field, eps_macro_curr, sig_macro_curr = update_stress_fft_full(
+                        self.grid, self.eps_macro, self.E, self.nu, 
+                        pixel=self.pixel, **self.solver_args
+                    )
+                    
+                    if kmc_mode == "on_demand":
+                        # C-Style: Break loop. One event = One step.
+                        # Do NOT increment elastic steps.
+                        break
+                    if kmc_mode == "on_demand":
+                         # C-Style: We break the loop here. ONE event is ONE step.
+                         # But we didn't do elastic loading, so elastic_steps_done does NOT increment.
+                         break
+                    
+                else:
+                    # ELASTIC EVENT
+                    # Advance time
+                    self.time += dt_elastic
+                    
+                    # Apply Loading
+                    if use_loading_func:
+                        current_params = loading_params.copy()
+                        current_params["eps_xx"] = eps_target * (step / n_global_steps)
+                        target_eps = loading_func(**current_params)
+                        self.eps_macro = target_eps
+                    else:
+                        self.eps_macro += strain_increment_tensor
+                    
+                    # Update Stress
+                    self.eps_field, self.sig_field, eps_macro_curr, sig_macro_curr = update_stress_fft_full(
+                        self.grid, self.eps_macro, self.E, self.nu, 
+                        pixel=self.pixel, **self.solver_args
+                    )
+                    
+                    # Finalize Elastic Step
+                    elastic_steps_done += 1
+                    break
             
-            # Record Predictor for Detailed Path
-            self.history_detailed.append((eps_macro_curr[0,0], sig_macro_curr[0,0]/1e9))
+            # --- End of Decision Loop (Elastic Event Occurred) ---
             
-            # Run Cascade (Plastic Corrector)
+            # Run Post-Elastic Cascade (Plastic Corrector)
+            # This handles any instability caused by the elastic step
             local_steps, total_flips, eps_macro_curr, sig_macro_curr = self._run_cascade(global_step=step)
             
-            # Log
-            self.log_global(step, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
+            # Log Global Step
+            # For "on_demand", we log every step (even if just KMC), OR we log only on elastic?
+            # C code logs every N events. Here we'll log every *elastic* step if accumulate,
+            # but for on_demand we might get spam.
+            # Let's keep existing behavior: Log only when this outer loop iterates.
+            # In "accumulate": Outer loop = 1 Elastic Step (many KMC).
+            # In "on_demand": Outer loop = 1 Event (KMC or Elastic).
             
-            # Record Global Envelope
+            self.log_global(step, eps_macro_curr, sig_macro_curr, local_steps, total_flips)
             self.history_global.append((eps_macro_curr[0,0], sig_macro_curr[0,0]/1e9))
             
-            # Current stress component
             curr_stress_val = sig_macro_curr[stress_drop_component]
+            
+            if kmc_mode == "on_demand" and dt_kmc < dt_elastic:
+                event_type = "KMC"
+            else:
+                event_type = "ELASTIC"
 
-            status_msg = f"Step {step}: Cascade Steps={local_steps}, Flips={total_flips}, Sig_xx={curr_stress_val/1e9:.2f} GPa"
-
+            status_msg = f"Step {step} ({event_type}): KMC Events={kmc_substeps}, Cascade Steps={local_steps}, Flips={total_flips}, Sig_xx={curr_stress_val/1e9:.2f} GPa"
+            kmc_substeps = 0 # Reset counter for next step
+            
+            # Update Outer Loop Counter
+            step += 1
+            
             # Checkpoint Logic
             if checkpoint_interval and step % checkpoint_interval == 0:
                 if keep_checkpoints:
@@ -531,6 +675,8 @@ class AthermalSimulation:
                 else:
                     print(f"Stopping criteria: {stop_post_drop_steps} steps after detection.")
                     break
+            
+            step += 1
 
         print("Simulation Complete.")
 
@@ -557,9 +703,10 @@ class AthermalSimulation:
                   mixed_tol=1e-4, mixed_max_iter=10,
                   vtk_mode="global",
                   checkpoint_interval=None, checkpoint_path=None, keep_checkpoints=False,
-                  stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0):
+                  stop_on_stress_drop=None, stress_drop_component=(0,0), stop_post_drop_steps=0,
+                  kmc_mode="accumulate"):
         """
-        Run simulation with mixed boundary conditions.
+        Run simulation with mixed boundary conditions (supports KMC).
         Drives strictly one strain component, while relaxing others to satisfy stress targets.
         
         Parameters
@@ -592,6 +739,8 @@ class AthermalSimulation:
             Which stress component to check
         stop_post_drop_steps : int
             Steps to continue after drop
+        kmc_mode : str ("accumulate" or "on_demand")
+            See run() docstring.
         """
         if stress_targets is None:
             # Default for uniaxial x-tension: relax yy and zz to zero
@@ -619,6 +768,16 @@ class AthermalSimulation:
         print(f"Driving component {component} with rate {strain_rate}")
         print(f"Relaxing components: {list(stress_targets.keys())}")
         
+        # Determine Elastic Time Step
+        # strain_rate arg is "increment per step"
+        # self.strain_rate is "1/s"
+        if self.strain_rate > 0:
+            dt_elastic = abs(strain_rate) / self.strain_rate
+        else:
+            dt_elastic = 1.0
+        
+        print(f"Elastic Time Step: {dt_elastic:.4e} s (based on rate {self.strain_rate})")
+        
         # Compliance approximation for correction (isotropic)
         E_avg = self.E.mean()
         nu_avg = self.nu.mean()
@@ -643,61 +802,118 @@ class AthermalSimulation:
              export_to_vtk(fname, self.eps_field, self.sig_field, self.E, self.nu, self.pixel, 
                           grid=self.grid, include_plastic=True, match_matplotlib_orientation=True)
 
-        for step in range(1, n_global_steps + 1):
+        step = 1
+        kmc_substeps = 0
+        elastic_steps_done = 0
+        
+        while elastic_steps_done < n_global_steps:
             self.current_step = step
-            
-            # 1. Apply Driving Strain
-            eps_inc = np.zeros((3,3))
-            eps_inc[component] = strain_rate
-            self._apply_strain_increment(eps_inc)
-            
-            # 2. Iterative Relaxation Loop
-            iteration_flips = 0
             iteration_steps = 0
-            converged = False
+            iteration_flips = 0
             
-            for it in range(mixed_max_iter):
-                # a. Settle system (Plasticity)
-                l_steps, t_flips, eps_M, sig_M = self._run_cascade(global_step=step)
-                iteration_flips += t_flips
-                iteration_steps += l_steps
+            # KMC Decision Loop
+            while True:
+                # 1. Check Stability (should be stable from previous step, but check)
+                unstable = find_unstable(self.grid, self.volume, 
+                                         softening_scheme=self.softening_scheme,
+                                         threshold=self.stability_threshold)
+                if unstable:
+                    l_steps, t_flips, _, _ = self._run_cascade(global_step=step)
+                    continue
                 
-                # b. Check Stress Targets
-                stress_err_tensor = np.zeros((3,3))
-                max_err = 0.0
+                # 2. Compute Rates
+                if self.temperature > 0:
+                    rates, indices, total_rate = compute_rates(
+                        self.grid, self.volume, self.temperature,
+                        strain_rate_sensitivity=self.strain_rate_sensitivity,
+                        applied_strain_rate=self.strain_rate,
+                        current_time=self.time
+                    )
+                    idx, dt_kmc = select_event(rates, total_rate)
+                else:
+                    dt_kmc = float('inf')
+                    idx = None
                 
-                for idx, target in stress_targets.items():
-                    err = target - sig_M[idx]
-                    stress_err_tensor[idx] = err
-                    max_err = max(max_err, abs(err))
-                
-                if max_err < mixed_tol:
-                    converged = True
+                # 3. Decision (Probabilistic Hybrid)
+                trigger_threshold = np.exp(-dt_elastic / dt_kmc)
+                if self.temperature > 0 and np.random.uniform() > trigger_threshold:
+                    # THERMAL EVENT
+                    x, y, z, m = indices[idx]
+                    voxel = self.grid[x,y,z]
+                    
+                    apply_flip(voxel, m, jp=self.jp, jt=self.jt, g_max=self.softening_cap)
+                    voxel.set_catalog(self.mode_generator(self.M, self.gamma0))
+                    
+                    self.log_kmc(step, kmc_substeps, dt_kmc, (x,y,z,m))
+                    self.time += dt_kmc
+                    kmc_substeps += 1
+                    
+                    # Update Stress (without mixed relaxation)
+                    self.eps_field, self.sig_field, eps_macro_curr, sig_macro_curr = update_stress_fft_full(
+                        self.grid, self.eps_macro, self.E, self.nu, 
+                        pixel=self.pixel, **self.solver_args
+                    )
+                    
+                    if kmc_mode == "on_demand":
+                         break
+                    
+                    if kmc_mode == "on_demand":
+                        # C-Style: One event per step. Break inner loop.
+                        # Do NOT increment elastic_steps_done
+                        break
+                else:
+                    # ELASTIC EVENT
+                    self.time += dt_elastic
+                    
+                    # 1. Apply Driving Strain
+                    eps_inc = np.zeros((3,3))
+                    eps_inc[component] = strain_rate
+                    self._apply_strain_increment(eps_inc)
+                    
+                    # 2. Iterative Relaxation Loop (Mixed BC)
+                    converged = False
+                    
+                    for it in range(mixed_max_iter):
+                        l_steps, t_flips, eps_M, sig_M = self._run_cascade(global_step=step)
+                        iteration_flips += t_flips
+                        iteration_steps += l_steps
+                        
+                        stress_err_tensor = np.zeros((3,3))
+                        max_err = 0.0
+                        for idx_t, target in stress_targets.items():
+                            err = target - sig_M[idx_t]
+                            stress_err_tensor[idx_t] = err
+                            max_err = max(max_err, abs(err))
+                        
+                        if max_err < mixed_tol:
+                            converged = True
+                            break
+                        
+                        eps_corr = get_correction(stress_err_tensor)
+                        eps_corr[component] = 0.0
+                        self._apply_strain_increment(eps_corr)
+                    
+                    if not converged:
+                        print(f"Warning: Mixed control did not converge at step {step} (Max Err: {max_err:.2e})")
+                    
+                    # Break decision loop to finalize step
                     break
-                
-                # c. Apply Correction (Elasticity)
-                # Compute strain correction to reduce stress error
-                eps_corr = get_correction(stress_err_tensor)
-                
-                # Enforce: Do NOT change the driven component!
-                eps_corr[component] = 0.0
-                
-                # Apply correction
-                self._apply_strain_increment(eps_corr)
             
-            if not converged:
-                print(f"Warning: Mixed control did not converge at step {step} (Max Err: {max_err:.2e})")
+            # --- End of Decision Loop ---
 
             # Final values
             eps_macro_curr = self.eps_field.mean(axis=(0,1,2))
             sig_macro_curr = self.sig_field.mean(axis=(0,1,2))
 
             # Log
+            iteration_steps = locals().get('iteration_steps', 0)
+            iteration_flips = locals().get('iteration_flips', 0)
             self.log_global(step, eps_macro_curr, sig_macro_curr, iteration_steps, iteration_flips)
             self.history_global.append((eps_macro_curr[0,0], sig_macro_curr[0,0]/1e9))
             
             curr_stress_val = sig_macro_curr[stress_drop_component]
-            status_msg = f"Step {step}: Cascade Steps={iteration_steps}, Flips={iteration_flips}, Sig_xx={curr_stress_val/1e9:.2f} GPa"
+            status_msg = f"Step {step}: KMC={kmc_substeps}, Cascade={iteration_steps}, Flips={iteration_flips}, Sig_xx={curr_stress_val/1e9:.2f} GPa"
+            kmc_substeps = 0
 
             # Checkpoint Logic
             if checkpoint_interval and step % checkpoint_interval == 0:
@@ -733,5 +949,7 @@ class AthermalSimulation:
                 else:
                     print(f"Stopping criteria: {stop_post_drop_steps} steps after detection.")
                     break
-
+            
+            step += 1
+            
         print("Mixed Simulation Complete.")

@@ -1,0 +1,35 @@
+#!/bin/bash
+
+check=${1:?Error: Missing 4th argument - # of files }
+check=${2:?Error: Missing 5th argument - # of nodes }
+
+for nfile in $(seq 1 1 $1)
+do
+num=$(printf %03d $nfile)
+fstrain="Strain${num}.out"
+fstress="Stress${num}.out"
+fdisp1="X1R${num}.out"
+fdisp2="X2R${num}.out"
+#ftemp="Temp${num}.out"
+
+for npp in $(seq 1 1 $2)
+do
+np=$(printf %02d $((npp-1)))
+f1="Strain${num}_P${np}.out"
+f2="Stress${num}_P${np}.out"
+f3="X1R${num}_P${np}.out"
+f4="X2R${num}_P${np}.out"
+#f5="Temp${num}_P${np}.out"
+cat $f1 >> $fstrain 
+cat $f2 >> $fstress 
+cat $f3 >> $fdisp1
+cat $f4 >> $fdisp2
+#cat $f5 >> $ftemp
+rm $f1
+rm $f2
+rm $f3
+rm $f4
+#rm $f5
+done
+
+done

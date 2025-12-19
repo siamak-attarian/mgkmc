@@ -62,6 +62,12 @@ def save_checkpoint(sim, filename):
         meta.attrs['solver_max_iter'] = sim.solver_args.get('max_iter', 200)
         meta.attrs['solver_tol'] = sim.solver_args.get('tol', 1e-6)
         
+        # Physics Parameters
+        meta.attrs['temperature'] = sim.temperature
+        meta.attrs['strain_rate'] = sim.strain_rate
+        meta.attrs['strain_rate_sensitivity'] = sim.strain_rate_sensitivity
+        meta.attrs['stability_threshold'] = getattr(sim, 'stability_threshold', 0.0)
+        
         # Loading configuration
         loading_grp = meta.create_group('loading_config')
         if hasattr(sim, 'loading_func_name'):
@@ -244,6 +250,12 @@ def load_checkpoint(filename):
             'tol': meta.attrs['solver_tol']
         }
         
+        # Load physics parameters (with defaults for old checkpoints)
+        temperature = meta.attrs.get('temperature', 0.0)
+        strain_rate = meta.attrs.get('strain_rate', 1.0)
+        strain_rate_sensitivity = meta.attrs.get('strain_rate_sensitivity', 0.0)
+        stability_threshold = meta.attrs.get('stability_threshold', 0.0)
+        
         current_step = meta.attrs['current_step']
         
         # Loading configuration
@@ -284,7 +296,11 @@ def load_checkpoint(filename):
             softening_params={'jp': jp, 'jt': jt},
             softening_scheme=softening_scheme,
             softening_cap=softening_cap,
-            solver_args=solver_args
+            solver_args=solver_args,
+            temperature=temperature,
+            strain_rate=strain_rate,
+            strain_rate_sensitivity=strain_rate_sensitivity,
+            stability_threshold=stability_threshold
         )
         
         # Store initial fields

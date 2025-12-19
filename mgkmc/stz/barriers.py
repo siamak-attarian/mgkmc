@@ -1,12 +1,27 @@
 import numpy as np
 
-def compute_barrier(voxel, volume, softening_scheme="isotropic", debug=False):
+def compute_barrier(voxel, volume, softening_scheme="isotropic", debug=False, current_time=0.0, tau=np.inf):
     """
     Compute Q[m] = voxel.Q0[m] * exp(-g_eff) - work
     softening_scheme: "isotropic" or "directional"
+    current_time: Current simulation time (for decay)
+    tau: Decay time constant (t_Temp)
     """
+    # Transient Softening Decay
+    # g_t(t) = g_t(0) * exp(-(t - t_last)/tau)
+    g_t_curr = 0.0
+    if voxel.g_t > 0:
+        if tau == np.inf:
+            g_t_curr = voxel.g_t # No decay (infinite tau or T=0)
+        elif voxel.last_event_time == -np.inf:
+            g_t_curr = 0.0 # Never flipped, no transient heat
+        else:
+            dt = current_time - voxel.last_event_time
+            if dt < 0: dt = 0 # Safety for numerical jitter
+            g_t_curr = voxel.g_t * np.exp(-dt / tau)
+
     # Base softening parameter
-    g_base = voxel.g_p + voxel.g_t
+    g_base = voxel.g_p + g_t_curr
     
     Q = np.zeros(voxel.M)
     
@@ -57,7 +72,7 @@ def compute_barrier(voxel, volume, softening_scheme="isotropic", debug=False):
     
     # Debug output for first mode if requested
     if debug:
-        print(f"  [DEBUG] Mode 0: Q0={voxel.Q0[0]:.4f}, g_base={g_base:.4f}, Mod={modifiers[0]:.4f}, exp(-g_eff)={np.exp(-g_eff[0]):.4f}")
+        print(f"  [DEBUG] Mode 0: Q0={voxel.Q0[0]:.4f}, g_base={g_base:.4f} (gp={voxel.g_p:.4f}, gt={g_t_curr:.4f}), Mod={modifiers[0]:.4f}")
     
     voxel.Q = Q
     return Q
