@@ -111,7 +111,8 @@ def reconstruct_displacement_element_centered(eps, pixel=1.0):
 
 def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
                   grid=None, include_plastic=True,
-                  match_matplotlib_orientation=False):
+                  match_matplotlib_orientation=False,
+                  eps_plastic_field=None, soft_prop_field=None):
     """
     Export voxel-based FFT results to VTK.
 
@@ -130,11 +131,15 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
     pixel : float
         Voxel size
     grid : np.ndarray, optional
-        Grid of Voxel objects for extracting plastic strain and softening data
+        Grid of Voxel objects (Legacy)
     include_plastic : bool
-        If True and grid is provided, include plastic strain and softening fields
+        If True, include plastic strain/softening data.
     match_matplotlib_orientation : bool
         If True, the VTK view will look exactly like matplotlib imshow(origin='lower').
+    eps_plastic_field : np.ndarray, optional
+        (nx, ny, nz, 3, 3) plastic strain field (SoA)
+    soft_prop_field : np.ndarray, optional
+        (nx, ny, nz, 4) softening properties field (SoA)
     """
 
     nx, ny, nz = E.shape
@@ -225,9 +230,36 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
     }
     
     # ---------------------------
-    # Add plastic strain and softening data if grid is provided
+    # Add plastic strain and softening data
     # ---------------------------
-    if grid is not None and include_plastic:
+    # Case A: Numba / SoA Arrays provided
+    if eps_plastic_field is not None:
+        eps_plastic = eps_plastic_field
+        
+        # Plastic strain components
+        cell_data["eps_plastic_xx"] = [eps_plastic[...,0,0].ravel(order="C")]
+        cell_data["eps_plastic_yy"] = [eps_plastic[...,1,1].ravel(order="C")]
+        cell_data["eps_plastic_zz"] = [eps_plastic[...,2,2].ravel(order="C")]
+        cell_data["eps_plastic_xy"] = [eps_plastic[...,0,1].ravel(order="C")]
+        cell_data["eps_plastic_xz"] = [eps_plastic[...,0,2].ravel(order="C")]
+        cell_data["eps_plastic_yz"] = [eps_plastic[...,1,2].ravel(order="C")]
+        
+        # Von Mises plastic strain
+        tr_eps_p = np.trace(eps_plastic, axis1=3, axis2=4)[..., None, None]
+        eps_p_dev = eps_plastic - np.eye(3)[None,None,None,:,:] * tr_eps_p/3
+        eps_plastic_vm = np.sqrt((2/3) * np.sum(eps_p_dev**2, axis=(3,4)))
+        cell_data["eps_plastic_vm"] = [eps_plastic_vm.ravel(order="C")]
+        
+        # Softening Properties
+        if soft_prop_field is not None:
+            # soft_prop: [g_p, g_t, ...]
+            g_p = soft_prop_field[...,0]
+            g_t = soft_prop_field[...,1]
+            cell_data["g_p"] = [g_p.ravel(order="C")]
+            cell_data["g_t"] = [g_t.ravel(order="C")]
+
+    # Case B: Legacy Grid provided
+    elif grid is not None and include_plastic:
         # Extract plastic strain field
         eps_plastic = np.zeros((nx, ny, nz, 3, 3))
         g_p = np.zeros((nx, ny, nz))

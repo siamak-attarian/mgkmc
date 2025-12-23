@@ -1,78 +1,97 @@
 import numpy as np
+from numba import jit
 
-def compute_barrier(voxel, volume, softening_scheme="isotropic", debug=False, current_time=0.0, tau=np.inf):
+@jit(nopython=True, cache=True)
+def compute_barrier(Q_field, Q0_field, sigma_field, catalog, volume, 
+                    soft_prop, last_event_time, current_time, 
+                    prev_strain_dir, softening_cap,
+                    softening_scheme_idx=0, tau=np.inf):
     """
-    Compute Q[m] = voxel.Q0[m] * exp(-g_eff) - work
-    softening_scheme: "isotropic" or "directional"
-    current_time: Current simulation time (for decay)
-    tau: Decay time constant (t_Temp)
+    Compute barriers for ALL voxels in place.
+    
+    Parameters
+    ----------
+    Q_field : (nx, ny, nz, M) - Updated in place
+    Q0_field : (nx, ny, nz, M)
+    sigma_field : (nx, ny, nz, 3, 3)
+    catalog : (nx, ny, nz, M, 3, 3)
+    volume : float
+    soft_prop : (nx, ny, nz, 4) - [g_p, g_t, unused, unused]
+    last_event_time : (nx, ny, nz)
+    current_time : float
+    prev_strain_dir : (nx, ny, nz, 3, 3) - Normalized strain direction of last event
+    softening_cap : float - e.g. 0.78
+    softening_scheme_idx : int 0=isotropic, 1=directional
+    tau : float
     """
-    # Transient Softening Decay
-    # g_t(t) = g_t(0) * exp(-(t - t_last)/tau)
-    g_t_curr = 0.0
-    if voxel.g_t > 0:
-        if tau == np.inf:
-            g_t_curr = voxel.g_t # No decay (infinite tau or T=0)
-        elif voxel.last_event_time == -np.inf:
-            g_t_curr = 0.0 # Never flipped, no transient heat
-        else:
-            dt = current_time - voxel.last_event_time
-            if dt < 0: dt = 0 # Safety for numerical jitter
-            g_t_curr = voxel.g_t * np.exp(-dt / tau)
-
-    # Base softening parameter
-    g_base = voxel.g_p + g_t_curr
-    
-    Q = np.zeros(voxel.M)
-    
-    # Pre-calculate directional modifiers if needed
-    if softening_scheme == "directional" and voxel.prev_gamma is not None:
-         # Norm of previous gamma
-         norm_prev = np.sqrt(np.sum(voxel.prev_gamma**2))
-         if norm_prev < 1e-12:
-              modifiers = np.ones(voxel.M) # Fallback if prev is zero
-         else:
-              # VECTORIZED: Process all modes at once
-              # catalog is already numpy array of shape (M, 3, 3)
-              catalog_array = voxel.catalog  # Shape: (M, 3, 3)
-              
-              # Dot products: sum over last two dimensions
-              # prev_gamma is (3, 3), broadcast to (1, 3, 3) for element-wise multiply
-              dots = np.sum(catalog_array * voxel.prev_gamma[np.newaxis, :, :], axis=(1, 2))  # Shape: (M,)
-              
-              # Norms of current gammas
-              norms_curr = np.sqrt(np.sum(catalog_array**2, axis=(1, 2)))  # Shape: (M,)
-              
-              # Cosine similarities
-              cosines = dots / (norm_prev * norms_curr + 1e-12)  # Shape: (M,)
-              
-              # Square Forward Modifier: (1 + cos)^2 / 4
-              # cos=1 -> mod=1 (Full softening)
-              # cos=-1 -> mod=0 (No softening)
-              # cos=0 -> mod=0.25 (Weak softening)
-              modifiers = (1.0 + cosines)**2 / 4.0  # Shape: (M,)
-    else:
-         # Isotropic: Modifier is 1.0 for all directions
-         modifiers = np.ones(voxel.M)
-
-    # VECTORIZED: Calculate work and Q for all modes at once
+    nx, ny, nz, M = Q_field.shape
     GPa_nm3_to_eV = 6.241509
-    sigma_GPa = voxel.sigma / 1e9  # Convert Pa to GPa, shape (3, 3)
     
-    # Work calculation: 0.5 * volume * sum(sigma_GPa * gamma) for each mode
-    # catalog is (M, 3, 3), sigma_GPa is (3, 3)
-    # Broadcast and sum over last two dimensions
-    work = 0.5 * volume * np.sum(voxel.catalog * sigma_GPa[np.newaxis, :, :], axis=(1, 2)) * GPa_nm3_to_eV  # Shape: (M,)
-    
-    # Effective softening: g_eff = modifier * g_base for each mode
-    g_eff = modifiers * g_base  # Shape: (M,)
-    
-    # Q calculation: Q[m] = Q0[m] * exp(-g_eff[m]) - work[m]
-    Q = voxel.Q0 * np.exp(-g_eff) - work  # Shape: (M,)
-    
-    # Debug output for first mode if requested
-    if debug:
-        print(f"  [DEBUG] Mode 0: Q0={voxel.Q0[0]:.4f}, g_base={g_base:.4f} (gp={voxel.g_p:.4f}, gt={g_t_curr:.4f}), Mod={modifiers[0]:.4f}")
-    
-    voxel.Q = Q
-    return Q
+    for x in range(nx):
+        for y in range(ny):
+            for z in range(nz):
+                # 1. Transient Softening
+                g_t = soft_prop[x,y,z,1]
+                t_last = last_event_time[x,y,z]
+                
+                g_t_curr = 0.0
+                if g_t > 0:
+                    if tau == np.inf:
+                        g_t_curr = g_t
+                    elif t_last == -np.inf:
+                        g_t_curr = 0.0
+                    else:
+                        dt = current_time - t_last
+                        if dt < 0: dt = 0
+                        g_t_curr = g_t * np.exp(-dt / tau)
+                
+                g_p = soft_prop[x,y,z,0]
+                g_base = g_p + g_t_curr
+                
+                # 2. Iterate Modes
+                # Using explicit loops for Numba speed on small arrays
+                for m in range(M):
+                    if softening_scheme_idx == 1: # Directional
+                         # Legacy Logic: Modifier = (1 + cos_theta)^2 / 4
+                         # We need dot product and norms of (catalog mode) vs (prev_strain_dir)
+                         
+                         dot_prod = 0.0
+                         norm_mode_sq = 0.0
+                         norm_prev_sq = 0.0
+                         
+                         for i in range(3):
+                             for j in range(3):
+                                 val_m = catalog[x,y,z,m,i,j]
+                                 val_p = prev_strain_dir[x,y,z,i,j]
+                                 
+                                 dot_prod += val_m * val_p
+                                 norm_mode_sq += val_m**2
+                                 norm_prev_sq += val_p**2
+                         
+                         norm_prev = np.sqrt(norm_prev_sq)
+                         norm_mode = np.sqrt(norm_mode_sq)
+                         
+                         if norm_prev < 1e-12:
+                             modifier = 1.0
+                         else:
+                             cos_theta = dot_prod / (norm_mode * norm_prev + 1e-12)
+                             # Restored Formula
+                             modifier = (1.0 + cos_theta)**2 / 4.0
+                    else:
+                        modifier = 1.0
+                    
+                    g_eff = modifier * g_base
+                    
+                    # Work: 0.5 * V * sum(sig * gamma)
+                    # Contract sigma (3,3) with catalog[x,y,z,m] (3,3)
+                    w_sum = 0.0
+                    for i in range(3):
+                        for j in range(3):
+                             w_sum += sigma_field[x,y,z,i,j] * catalog[x,y,z,m,i,j]
+                             
+                    # Sigma is in Pa, need GPa
+                    w_val = 0.5 * volume * (w_sum / 1e9) * GPa_nm3_to_eV
+                    
+                    # Q = Q0 * exp(-g) - W
+                    Q_field[x,y,z,m] = Q0_field[x,y,z,m] * np.exp(-g_eff) - w_val
+
