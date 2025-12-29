@@ -10,5 +10,7 @@ setup(
         "matplotlib",
         "meshio",
         "pyfftw",
+        "h5py",
+        "numba",
     ],
 )
