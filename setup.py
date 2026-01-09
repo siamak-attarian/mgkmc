@@ -12,5 +12,6 @@ setup(
         "pyfftw",
         "h5py",
         "numba",
+        "pyyaml",
     ],
 )
