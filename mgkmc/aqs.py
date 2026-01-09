@@ -8,6 +8,7 @@ from mgkmc.analysis import export_to_vtk
 from mgkmc.stz.kmc import compute_rates, select_event, decode_index
 from mgkmc.stz.barriers import compute_barrier
 from mgkmc.checkpoint import save_checkpoint, load_checkpoint
+from mgkmc.stz.barrier_generators import get_barrier_generator
 
 class AthermalSimulation:
     def __init__(self, 
@@ -16,6 +17,7 @@ class AthermalSimulation:
                  E_field, nu_field,
                  pixel=1.0,  
                  barrier_generator=None,
+                 barrier_kwargs={},
                  softening_scheme="isotropic", # "isotropic" or "directional"
                  softening_cap=2.0,
                  jp=10.0, jt=30.0,
@@ -94,9 +96,16 @@ class AthermalSimulation:
         # ================= Initialization =================
         # Q0
         if barrier_generator is None:
-             self.Q0 = np.random.normal(loc=2.0, scale=0.6, size=(nx, ny, nz, M))
+             # Default legacy behavior
+             self.barrier_generator = get_barrier_generator("gaussian", mean=2.0, std=0.6)
+        elif isinstance(barrier_generator, str):
+             # Built-in generator
+             self.barrier_generator = get_barrier_generator(barrier_generator, **barrier_kwargs)
         else:
-             self.Q0 = barrier_generator((nx, ny, nz, M))
+             # Custom function
+             self.barrier_generator = barrier_generator
+             
+        self.Q0 = self.barrier_generator((nx, ny, nz, M))
 
         # Catalog
         # Fill catalog with random modes
@@ -117,15 +126,23 @@ class AthermalSimulation:
         
         self.solver_args = {}
 
-    def _init_logs(self):
+    def _init_logs(self, summary_filename="summary_log.txt"):
         # Create log files with headers
         self.log_global_path = os.path.join(self.output_dir, "global_log.txt")
         self.cascade_log_path = os.path.join(self.output_dir, "cascade_log.txt")
+        self.summary_log_path = os.path.join(self.output_dir, summary_filename)
         
         # Clear existing
         open(self.log_global_path, 'w').close()
         open(self.cascade_log_path, 'w').close()
         
+        # Summary Log Header
+        # [Timestamp] [Elapsed] Step Type Eps_xx Sig_xx KMC Cascade Flips
+        summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8}\n"
+        with open(self.summary_log_path, "w") as f:
+            f.write(summary_header)
+            f.write("-" * len(summary_header) + "\n")
+
         # Global Log Header (Legacy Format)
         header_fmt = "{:<10} {:<12} {:<10} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
         headers = [
@@ -270,20 +287,9 @@ class AthermalSimulation:
                  # Renew Catalog (Assumption: simple renewal)
                  self.catalog[ux,uy,uz,um] = stz_catalog_glass(1, self.gamma0)[0]
                  
-                 # Reset Barrier (New Q0)
-                 if hasattr(self, 'barrier_generator') and self.barrier_generator is not None:
-                      # Generate 1 new barrier? Or pass generator?
-                      # Simple normal for now matching legacy fallback or use stored generator
-                      # self.Q0[ux,uy,uz,um] = np.random.normal(2.0, 0.6) # simplistic
-                      # Better: use the stored generator logic if possible, 
-                      # but for Numba speed we might just re-roll.
-                      # Note: aqs.py doesn't store generator nicely for single calls maybe?
-                      # Let's assume simplistic or fix later.
-                      # Re-using the logic from init if possible.
-                      self.Q0[ux,uy,uz,um] = np.random.normal(2.0, 0.6) 
-                      if self.Q0[ux,uy,uz,um] < 0.1: self.Q0[ux,uy,uz,um] = 0.1
-                 else:
-                      self.Q0[ux,uy,uz,um] = np.random.normal(2.0, 0.6)
+                 # Reset Barrier (New Q0) - Consistent with the configured generator
+                 # We generate one new value using the generator (shape=(1,))
+                 self.Q0[ux,uy,uz,um] = self.barrier_generator((1,))[0]
             
             total_flips += n_unstable
             
@@ -306,10 +312,14 @@ class AthermalSimulation:
     def run_mixed(self, n_global_steps, strain_rate, component=(0,1), 
                   stress_targets={}, mixed_tol=1e-4, mixed_max_iter=50,
                   kmc_mode="accumulate", # "accumulate" or "on_demand"
-                  checkpoint_interval=None, checkpoint_path="checkpoint", keep_checkpoints=True,
+                  checkpoint_interval=None, checkpoint_path="checkpoint", 
+                  checkpoint_mode="periodic", # "periodic", "current", "last", or "none"
                   stop_on_stress_drop=None, stress_drop_component=(0,1), stop_post_drop_steps=0,
                   vtk_mode=None, ignore_drop_steps=0,
-                  checkpoint_elastic_only=False):
+                  checkpoint_elastic_only=False,
+                  enable_console_log=True,
+                  summary_filename="summary_log.txt",
+                  stress_drop_lookback=1):
         
         # Setup defaults
         if not stress_targets: # Check if empty dict
@@ -321,7 +331,11 @@ class AthermalSimulation:
                  stress_targets[(1,1)] = 0.0
                  stress_targets[(2,2)] = 0.0
 
-        self._init_logs()
+        self._init_logs(summary_filename=summary_filename)
+        
+        import time
+        from datetime import datetime
+        start_time_total = time.time()
         
         # Elastic Time Step
         if self.strain_rate > 0:
@@ -336,8 +350,11 @@ class AthermalSimulation:
         elastic_chk_id = 0
         
         # Save Initial State (Step 0) - Always treated as Elastic
-        if checkpoint_interval is not None and keep_checkpoints:
-             if checkpoint_elastic_only:
+        # Only save if mode is periodic or current
+        if checkpoint_interval is not None and checkpoint_mode in ["periodic", "current"]:
+             if checkpoint_mode == "current":
+                 cp_name = f"{checkpoint_path}.h5"
+             elif checkpoint_elastic_only:
                  cp_name = f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5"
                  elastic_chk_id += 1
              else:
@@ -345,13 +362,14 @@ class AthermalSimulation:
              
              self.save_checkpoint(cp_name, step=0)
         
+        # Detection state
+        stress_history = [sig_curr[stress_drop_component]]
+        stop_drop_triggered = False
+        stop_countdown = stop_post_drop_steps
+        
         step = 1
         elastic_steps_done = 0
         total_kmc_steps = 0
-        
-        prev_stress_val = sig_curr[stress_drop_component]
-        stop_drop_triggered = False
-        stop_countdown = stop_post_drop_steps
         
         # Helper for Legacy Compliance
         E_avg = np.mean(self.E)
@@ -473,17 +491,30 @@ class AthermalSimulation:
              self.history_global.append((eps_curr[0,0], sig_curr[0,0]/1e9))
              
              curr_stress_val = sig_curr[stress_drop_component]
-             status_msg = f"Step {step}: Type={last_step_type.upper()}, KMC={total_kmc_steps}, Cascade={iteration_steps}, Flips={iteration_flips}, Sig_xx={curr_stress_val/1e9:.2f} GPa"
+             curr_strain_val = eps_curr[stress_drop_component]
              
+             # Timing
+             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+             elapsed = time.time() - start_time_total
+             
+             status_msg = f"[{now}] [{elapsed:8.2f}s] Step {step:4d}: Type={last_step_type.upper():<8}, KMC={total_kmc_steps:4d}, Cascade={iteration_steps:4d}, Flips={iteration_flips:4d}, Eps_xx={curr_strain_val:8.6f}, Sig_xx={curr_stress_val/1e9:6.3f} GPa"
+             
+             # Write to Summary Log
+             # Formatted for the header defined in _init_logs
+             summary_line = f"{now:<20} {elapsed:<12.2f} {step:<8d} {last_step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {iteration_steps:<8d} {iteration_flips:<8d}\n"
+             with open(self.summary_log_path, "a") as f:
+                 f.write(summary_line)
+            
              # Checkpoint Logic
              should_save = False
              if checkpoint_interval and step % checkpoint_interval == 0:
-                 should_save = True
-                 if checkpoint_elastic_only and last_step_type != "elastic":
-                     should_save = False
+                 if checkpoint_mode in ["periodic", "current"]:
+                     should_save = True
+                     if checkpoint_elastic_only and last_step_type != "elastic":
+                         should_save = False
              
              if should_save:
-                 if keep_checkpoints:
+                 if checkpoint_mode == "periodic":
                      if checkpoint_elastic_only:
                          # Sequential Elastic Checkpoint
                          cp_name = f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5"
@@ -491,25 +522,30 @@ class AthermalSimulation:
                      else:
                          # Standard Global Step Checkpoint
                          cp_name = f"{checkpoint_path}_{step:06d}.h5"
-                 else:
+                 else: # checkpoint_mode == "current"
                      cp_name = f"{checkpoint_path}.h5"
                  self.save_checkpoint(cp_name, step=step)
 
              # Stress Drop Detection Logic
              if stop_on_stress_drop is not None and not stop_drop_triggered:
                  if step > ignore_drop_steps:
-                     if abs(prev_stress_val) > 1e-6:
-                         drop_frac = (prev_stress_val - curr_stress_val) / prev_stress_val
-                     else:
-                         drop_frac = 0.0
-                     
-                     if drop_frac > stop_on_stress_drop:
-                         print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
-                         stop_drop_triggered = True
-                         status_msg += " [SB DETECTED]"
+                     # Look back logic
+                     lookback = max(1, stress_drop_lookback)
+                     if len(stress_history) >= lookback:
+                         ref_stress = stress_history[-lookback]
+                         if abs(ref_stress) > 1e-6:
+                             drop_frac = (ref_stress - curr_stress_val) / ref_stress
+                         else:
+                             drop_frac = 0.0
+                         
+                         if drop_frac > stop_on_stress_drop:
+                             print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% (Trend over {lookback} steps) at step {step}")
+                             stop_drop_triggered = True
+                             status_msg += " [SB DETECTED]"
              
-             prev_stress_val = curr_stress_val
-             print(status_msg)
+             stress_history.append(curr_stress_val)
+             if enable_console_log:
+                 print(status_msg)
              
              if stop_drop_triggered:
                  if stop_countdown > 0:
@@ -520,6 +556,14 @@ class AthermalSimulation:
              
              step += 1
 
+        # Final Save
+        if checkpoint_mode == "last":
+             self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
+        elif checkpoint_mode in ["periodic", "current"]:
+             # Optional: Ensure the very last state is saved if it wasn't just saved
+             if checkpoint_interval is not None and (step-1) % checkpoint_interval != 0:
+                  self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
+
 
     def run(self, *args, **kwargs):
         print("Use run_mixed instead.")
@@ -529,49 +573,57 @@ class AthermalSimulation:
          if not path.endswith('.h5'):
              path += '.h5'
              
-         try:
-             import h5py
-             from datetime import datetime
+         # Disable HDF5 locking to avoid conflicts with cloud sync (Google Drive)
+         os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
              
-             with h5py.File(path, "w") as f:
-                 # Metadata
-                 meta = f.create_group('metadata')
-                 meta.attrs['nx'] = self.grid_shape[0]
-                 meta.attrs['ny'] = self.grid_shape[1]
-                 meta.attrs['nz'] = self.grid_shape[2]
-                 meta.attrs['M'] = self.M
-                 meta.attrs['gamma0'] = self.gamma0
-                 meta.attrs['pixel'] = self.pixel
-                 meta.attrs['timestamp'] = datetime.now().isoformat()
+         import h5py
+         import time
+         from datetime import datetime
+         
+         max_retries = 3
+         for attempt in range(max_retries):
+             try:
+                 with h5py.File(path, "w") as f:
+                     # Metadata
+                     meta = f.create_group('metadata')
+                     meta.attrs['nx'] = self.grid_shape[0]
+                     meta.attrs['ny'] = self.grid_shape[1]
+                     meta.attrs['nz'] = self.grid_shape[2]
+                     meta.attrs['M'] = self.M
+                     meta.attrs['gamma0'] = self.gamma0
+                     meta.attrs['pixel'] = self.pixel
+                     meta.attrs['timestamp'] = datetime.now().isoformat()
+                     
+                     if step is not None:
+                         meta.attrs['step'] = step
+                     else:
+                         meta.attrs['step'] = 0
+                     
+                     # Fields (SoA Direct Dump)
+                     fields = f.create_group('fields')
+                     fields.create_dataset('eps_field', data=self.eps_field, compression='gzip')
+                     fields.create_dataset('sig_field', data=self.sig_field, compression='gzip')
+                     fields.create_dataset('E_field', data=self.E_field, compression='gzip')
+                     fields.create_dataset('nu_field', data=self.nu_field, compression='gzip')
+                     
+                     # SoA State
+                     grid = f.create_group('grid')
+                     grid.create_dataset('eps_plastic', data=self.eps_plastic, compression='gzip')
+                     grid.create_dataset('soft_prop', data=self.soft_prop, compression='gzip')
+                     grid.create_dataset('Q', data=self.Q, compression='gzip')
+                     grid.create_dataset('Q0', data=self.Q0, compression='gzip')
+                     grid.create_dataset('catalog', data=self.catalog, compression='gzip')
+                     grid.create_dataset('last_event_time', data=self.last_event_time, compression='gzip')
                  
-                 if step is not None:
-                     meta.attrs['step'] = step
+                 # Success
+                 return
+                 
+             except (ImportError, Exception) as e:
+                 if attempt < max_retries - 1:
+                     # print(f"Warning: Checkpoint attempt {attempt+1} failed: {e}. Retrying...")
+                     time.sleep(0.5)
                  else:
-                     # Fallback to history or 0
-                     meta.attrs['step'] = 0
-                 
-                 # Fields (SoA Direct Dump)
-                 fields = f.create_group('fields')
-                 fields.create_dataset('eps_field', data=self.eps_field, compression='gzip')
-                 fields.create_dataset('sig_field', data=self.sig_field, compression='gzip')
-                 fields.create_dataset('E_field', data=self.E_field, compression='gzip')
-                 fields.create_dataset('nu_field', data=self.nu_field, compression='gzip')
-                 
-                 # SoA State
-                 grid = f.create_group('grid')
-                 grid.create_dataset('eps_plastic', data=self.eps_plastic, compression='gzip')
-                 grid.create_dataset('soft_prop', data=self.soft_prop, compression='gzip')
-                 grid.create_dataset('Q', data=self.Q, compression='gzip')
-                 grid.create_dataset('Q0', data=self.Q0, compression='gzip')
-                 # Catalog is massive, skipping compression might be faster but size is large
-                 grid.create_dataset('catalog', data=self.catalog, compression='gzip')
-                 grid.create_dataset('last_event_time', data=self.last_event_time, compression='gzip')
-                 
-                 # print(f"Checkpoint saved to {path} (SoA)")
-                 
-         except ImportError:
-             print("Warning: h5py not installed, cannot save checkpoint.")
-         except Exception as e:
-             print(f"Error saving checkpoint: {e}")
+                     print(f"Error saving checkpoint after {max_retries} attempts: {e}")
+
 
 

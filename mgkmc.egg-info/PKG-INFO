@@ -12,6 +12,8 @@ Requires-Dist: scipy
 Requires-Dist: matplotlib
 Requires-Dist: meshio
 Requires-Dist: pyfftw
+Requires-Dist: h5py
+Requires-Dist: numba
 
 # mgkmc
 
