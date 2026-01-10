@@ -1,0 +1,8 @@
+numpy
+scipy
+matplotlib
+meshio
+pyfftw
+h5py
+numba
+pyyaml

@@ -564,6 +564,19 @@ class AthermalSimulation:
              if checkpoint_interval is not None and (step-1) % checkpoint_interval != 0:
                   self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
 
+        # Log total duration
+        total_time = time.time() - start_time_total
+        m, s = divmod(total_time, 60)
+        h, m = divmod(m, 60)
+        duration_str = f"\nSimulation Finish Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        duration_str += f"\nTotal Duration: {total_time:.2f} seconds ({int(h):d}h {int(m):02d}m {int(s):02d}s)\n"
+        
+        with open(self.summary_log_path, "a") as f:
+            f.write(duration_str)
+        
+        if enable_console_log:
+            print(duration_str)
+
 
     def run(self, *args, **kwargs):
         print("Use run_mixed instead.")
