@@ -53,19 +53,16 @@ def apply_flip_soa(eps_plastic_field, key_field, soft_prop_field, last_event_tim
         for j in range(3):
             eps_plastic_field[x,y,z,i,j] += catalog[x,y,z,m,i,j]
             
-    # 2. Update Softening (Legacy Logic)
-    # Calculate Von Mises of the specific mode m
-    # vm = sqrt(1.5 * sum(gamma_ij^2))
+     # 2. Update Softening (Match C code DeltaSoftening logic)
     sum_sq = 0.0
     for i in range(3):
         for j in range(3):
             sum_sq += catalog[x,y,z,m,i,j]**2
-    vm = np.sqrt(1.5 * sum_sq)
     
     gp = soft_prop_field[x,y,z,0]
     
-    # g_p += jp * vm^2
-    gp_new = gp + jp * vm**2
+    # g_p += jp * sum_sq (Consistent with C code: PermSoftening += DeltaSoftening * PermSoft)
+    gp_new = gp + jp * sum_sq
     
     # Clamp g_p if cap is set
     if g_max > 0 and gp_new > g_max:
@@ -73,16 +70,8 @@ def apply_flip_soa(eps_plastic_field, key_field, soft_prop_field, last_event_tim
         
     soft_prop_field[x,y,z,0] = gp_new
     
-    # g_t = jt * vm^2 (Set to peak value, decays later)
-    # Note: legacy code set g_t = jt * vm**2 (not additive?)
-    # "voxel.g_t = jt * vm**2" -> It seems it resets or sets the magnitude?
-    # Usually transient heating is additive? 
-    # Checking legacy again: "voxel.g_t = jt * vm**2" -> It is assignment (=), not (+=).
-    # But usually heat accumulates? 
-    # Wait, if I flip again immediately, do I lose previous heat?
-    # The legacy code clearly wrote: voxel.g_t = jt * vm**2
-    # So we will follow that strictly.
-    gt_new = jt * vm**2
+    # g_t = jt * sum_sq (Consistent with C code: TempSoftening = DeltaSoftening * TempSoft)
+    gt_new = jt * sum_sq
     soft_prop_field[x,y,z,1] = gt_new
     
     # 3. Update Timestamp

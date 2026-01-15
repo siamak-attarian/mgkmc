@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 
 def generate_correlated_field(
@@ -19,6 +18,7 @@ def generate_correlated_field(
         field = np.clip(field, clip_min, clip_max)
 
     if visualize:
+        import matplotlib.pyplot as plt
         plt.imshow(field[:,:,shape[2]//2].T, origin='lower', cmap='viridis')
         plt.colorbar()
         plt.title(title)

@@ -1,13 +1,4 @@
-# mgkmc/plotting.py
-"""
-Convenient Matplotlib helper for visualising 2‑D slices of the strain and stress
-fields produced by the mgkmc library.
-All functions operate on 3‑D NumPy arrays with shape (nx, ny, nz) and return a
-Matplotlib figure.
-"""
-
 import numpy as np
-import matplotlib.pyplot as plt
 
 __all__ = ["plot_fields"]
 
@@ -149,6 +140,7 @@ def plot_fields(
         # Flatten layout for iteration
         layout = [fields[i:i+ncols] for i in range(0, n, ncols)]
 
+    import matplotlib.pyplot as plt
     fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 3.5*nrows))
     if nrows == 1 and ncols == 1:
         axes = np.array([[axes]])
