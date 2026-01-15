@@ -258,13 +258,15 @@ class AthermalSimulation:
                   kmc_mode="accumulate", 
                   checkpoint_interval=None, checkpoint_path="checkpoint", 
                   checkpoint_mode="periodic", 
-                  stop_on_stress_drop=None, stress_drop_component=(0,1), stop_post_drop_steps=0,
+                  stop_on_stress_drop=None, stress_drop_component=(0,1), stop_post_drop_steps=20,
                   vtk_mode=None, ignore_drop_steps=0,
                   checkpoint_elastic_only=False,
                   enable_console_log=True,
                   summary_filename="summary_log.txt",
                   stress_drop_lookback=1,
-                  save_q_interval=None):
+                  enable_save_q=False,
+                  save_q_interval=None,
+                  save_q_elastic_only=False):
         
         if not stress_targets:
              if component == (0,0):
@@ -281,7 +283,7 @@ class AthermalSimulation:
         dt_elastic = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
         _, _, eps_curr, sig_curr = self._run_cascade(global_step=0)
         
-        if save_q_interval is not None:
+        if enable_save_q and save_q_interval is not None:
              np.save(os.path.join(self.output_dir, "Q_step_000000.npy"), self.Q)
 
         elastic_chk_id = 0
@@ -304,6 +306,7 @@ class AthermalSimulation:
              return (sigma_err - nu_avg * tr_sig * np.eye(3)) / E_avg
         
         last_step_type = "elastic"
+        kmc_baseline_stress = None
 
         while elastic_steps_done < n_global_steps:
              iteration_steps, iteration_flips = 0, 0
@@ -339,8 +342,23 @@ class AthermalSimulation:
                       self.time += dt_kmc
                       total_kmc_steps += 1
                       last_step_type = "kmc"
+                      if kmc_baseline_stress is None:
+                           kmc_baseline_stress = sig_curr[stress_drop_component]
+                      
                       self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
                            self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
+                      
+                      # Stress drop detection for KMC
+                      sig_curr = self.sig_field.mean(axis=(0,1,2))
+                      curr_stress_val = sig_curr[stress_drop_component]
+                      if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
+                           if kmc_baseline_stress is not None:
+                                drop_frac = (kmc_baseline_stress - curr_stress_val) / kmc_baseline_stress if abs(kmc_baseline_stress) > 1e-6 else 0.0
+                                if drop_frac > stop_on_stress_drop:
+                                     print(f"\n[ALERT] KMC Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% (Cumulative since start of KMC sequence) at step {step}")
+                                     stop_drop_triggered = True
+                      stress_history.append(curr_stress_val)
+                      if stop_drop_triggered and kmc_mode == "accumulate": break
                       if kmc_mode == "on_demand": break
                  else:
                       self.time += dt_elastic
@@ -372,6 +390,20 @@ class AthermalSimulation:
                       if not converged: print(f"Warning: Mixed loop did not converge at step {step} (Err={max_err:.2e})")
                       elastic_steps_done += 1
                       last_step_type = "elastic"
+                      kmc_baseline_stress = None
+                      
+                      # Stress drop detection for Elastic
+                      sig_curr = self.sig_field.mean(axis=(0,1,2))
+                      curr_stress_val = sig_curr[stress_drop_component]
+                      if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
+                           lookback = max(1, stress_drop_lookback)
+                           if len(stress_history) >= lookback:
+                                ref_stress = stress_history[-lookback]
+                                drop_frac = (ref_stress - curr_stress_val) / ref_stress if abs(ref_stress) > 1e-6 else 0.0
+                                if drop_frac > stop_on_stress_drop:
+                                     print(f"\n[ALERT] Elastic Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
+                                     stop_drop_triggered = True
+                      stress_history.append(curr_stress_val)
                       break
              
              eps_curr, sig_curr = self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2))
@@ -380,6 +412,8 @@ class AthermalSimulation:
              curr_stress_val, curr_strain_val = sig_curr[stress_drop_component], eps_curr[stress_drop_component]
              now, elapsed = datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time_total
              status_msg = f"[{now}] [{elapsed:8.2f}s] Step {step:4d}: Type={last_step_type.upper():<8}, KMC={total_kmc_steps:4d}, Cascade={iteration_steps:4d}, Flips={iteration_flips:4d}, Eps_xx={curr_strain_val:8.6f}, Sig_xx={curr_stress_val/1e9:6.3f} GPa"
+             if stop_drop_triggered:
+                  status_msg += " [SB DETECTED]"
              summary_line = f"{now:<20} {elapsed:<12.2f} {step:<8d} {last_step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {iteration_steps:<8d} {iteration_flips:<8d}\n"
              with open(self.summary_log_path, "a") as f: f.write(summary_line)
              
@@ -391,19 +425,12 @@ class AthermalSimulation:
                   if checkpoint_elastic_only: elastic_chk_id += 1
                   self.save_checkpoint(cp_name, step=step)
 
-             if save_q_interval and step % save_q_interval == 0:
-                  np.save(os.path.join(self.output_dir, f"Q_step_{step:06d}.npy"), self.Q)
-
-             if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
-                  lookback = max(1, stress_drop_lookback)
-                  if len(stress_history) >= lookback:
-                      ref_stress = stress_history[-lookback]
-                      drop_frac = (ref_stress - curr_stress_val) / ref_stress if abs(ref_stress) > 1e-6 else 0.0
-                      if drop_frac > stop_on_stress_drop:
-                          print(f"\n[ALERT] Shear Band Detected! Stress drop {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% (Trend over {lookback} steps) at step {step}")
-                          stop_drop_triggered, status_msg = True, status_msg + " [SB DETECTED]"
-             
-             stress_history.append(curr_stress_val)
+             if enable_save_q and save_q_interval and step % save_q_interval == 0:
+                  should_save_q = True
+                  if save_q_elastic_only and last_step_type != "elastic":
+                       should_save_q = False
+                  if should_save_q:
+                       np.save(os.path.join(self.output_dir, f"Q_step_{step:06d}.npy"), self.Q)
              if enable_console_log: print(status_msg)
              if stop_drop_triggered:
                   if stop_countdown > 0: stop_countdown -= 1

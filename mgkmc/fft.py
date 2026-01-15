@@ -3,7 +3,6 @@ import numpy as np
 import pyfftw
 
 # Setup FFTW threading
-pyfftw.config.NUM_THREADS = multiprocessing.cpu_count()
 pyfftw.interfaces.cache.enable()
 import pyfftw.interfaces.numpy_fft as fft
 
