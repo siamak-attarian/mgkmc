@@ -13,9 +13,13 @@ def compute_wave_vectors(nx, ny, nz, Lx, Ly, Lz):
     kz_1d = 2*np.pi*fft.fftfreq(nz, d=Lz/nz)
     return np.meshgrid(kx_1d, ky_1d, kz_1d, indexing="ij")
 
-def fft_field(f):
-    return fft.fftn(f, norm="ortho")
+def fft_field(f, threads=None):
+    if threads is None:
+        threads = pyfftw.config.NUM_THREADS
+    return fft.fftn(f, norm="ortho", threads=threads)
 
 
-def ifft_field(f_hat):
-    return fft.ifftn(f_hat, norm="ortho").real
+def ifft_field(f_hat, threads=None):
+    if threads is None:
+        threads = pyfftw.config.NUM_THREADS
+    return fft.ifftn(f_hat, norm="ortho", threads=threads).real

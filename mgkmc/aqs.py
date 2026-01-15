@@ -118,14 +118,17 @@ class AthermalSimulation:
         self.log_global_path = os.path.join(self.output_dir, "global_log.txt")
         self.cascade_log_path = os.path.join(self.output_dir, "cascade_log.txt")
         self.summary_log_path = os.path.join(self.output_dir, summary_filename)
+        self.kmc_log_path = os.path.join(self.output_dir, "kmc_log.txt")
         
-        open(self.log_global_path, 'w').close()
-        open(self.cascade_log_path, 'w').close()
+        # Open handles with line buffering to reduce disk hits on WSL/NTFS
+        self._f_global = open(self.log_global_path, "w", buffering=1)
+        self._f_cascade = open(self.cascade_log_path, "w", buffering=1)
+        self._f_summary = open(self.summary_log_path, "w", buffering=1)
+        self._f_kmc = None # Lazy open
         
         summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8}\n"
-        with open(self.summary_log_path, "w") as f:
-            f.write(summary_header)
-            f.write("-" * len(summary_header) + "\n")
+        self._f_summary.write(summary_header)
+        self._f_summary.write("-" * len(summary_header) + "\n")
 
         header_fmt = "{:<10} {:<12} {:<10} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
         headers = [
@@ -134,12 +137,17 @@ class AthermalSimulation:
             "Sig_xx(GPa)", "Sig_yy(GPa)", "Sig_zz(GPa)", "Sig_xy(GPa)", "Sig_xz(GPa)", "Sig_yz(GPa)",
             "CascadeSteps", "TotalCascadeFlips"
         ]
-        with open(self.log_global_path, "w") as f:
-            f.write(header_fmt.format(*headers) + "\n")
+        self._f_global.write(header_fmt.format(*headers) + "\n")
             
         cascade_header_fmt = "{:<12} {:<12} {:<15} {:<30}"
-        with open(self.cascade_log_path, "w") as f:
-            f.write(cascade_header_fmt.format("GlobalStep", "LocalStep", "NumUnstable", "FlippedVoxels(x,y,z,mode)") + "\n")
+        self._f_cascade.write(cascade_header_fmt.format("GlobalStep", "LocalStep", "NumUnstable", "FlippedVoxels(x,y,z,mode)") + "\n")
+
+    def _close_logs(self):
+        for attr in ['_f_global', '_f_cascade', '_f_summary', '_f_kmc']:
+            f = getattr(self, attr, None)
+            if f:
+                f.close()
+                setattr(self, attr, None)
 
     def log_global(self, global_step, elastic_step, kmc_step, eps, sig, cascade_steps, total_flips):
         indices = [(0,0), (1,1), (2,2), (0,1), (0,2), (1,2)]
@@ -149,24 +157,25 @@ class AthermalSimulation:
         values.extend([sig[i,j]/1e9 for i,j in indices])
         values.append(cascade_steps)
         values.append(total_flips)
-        with open(self.log_global_path, "a") as f:
-            f.write(line_fmt.format(*values) + "\n")
+        if self._f_global:
+            self._f_global.write(line_fmt.format(*values) + "\n")
 
     def log_kmc(self, global_step, kmc_step, dt_kmc, dt_elastic, event_idx, barrier_ev):
-        path = os.path.join(self.output_dir, "kmc_log.txt")
         fmt_header = "{:<10} {:<10} {:<15} {:<15} {:<15} {:<20} {:<15}\n"
         fmt_data   = "{:<10d} {:<10d} {:<15.6e} {:<15.6e} {:<15.6e} {:<20} {:<15.6f}\n"
-        if not os.path.exists(path):
-            with open(path, "w") as f:
-                f.write(fmt_header.format("GlobalStep", "KMCStep", "DtElastic", "DtKMC", "e^(-DtE/DtK)", "Event(x,y,z,m)", "Barrier(eV)"))
+        
+        if self._f_kmc is None:
+            if not os.path.exists(self.kmc_log_path):
+                 with open(self.kmc_log_path, "w") as f:
+                      f.write(fmt_header.format("GlobalStep", "KMCStep", "DtElastic", "DtKMC", "e^(-DtE/DtK)", "Event(x,y,z,m)", "Barrier(eV)"))
+            self._f_kmc = open(self.kmc_log_path, "a", buffering=1)
+
         ratio = np.exp(-dt_elastic / dt_kmc) if dt_kmc > 0 else 0.0
         x, y, z, m = event_idx
         event_str = f"({x},{y},{z},{m})"
-        with open(path, "a") as f:
-            f.write(fmt_data.format(global_step, kmc_step, dt_elastic, dt_kmc, ratio, event_str, barrier_ev))
+        self._f_kmc.write(fmt_data.format(global_step, kmc_step, dt_elastic, dt_kmc, ratio, event_str, barrier_ev))
 
     def log_cascade(self, global_step, local_step, event_idx, barrier, n_unstable=1):
-        path = self.cascade_log_path
         try:
             if hasattr(event_idx, 'ndim') and event_idx.ndim == 2:
                 indices = event_idx
@@ -184,8 +193,8 @@ class AthermalSimulation:
             flip_str = ";".join(parts)
         
         line_fmt = "{:<12d} {:<12d} {:<15d} {:<30}\n"
-        with open(path, "a") as f:
-            f.write(line_fmt.format(global_step, local_step, n_unstable, flip_str))
+        if self._f_cascade:
+            self._f_cascade.write(line_fmt.format(global_step, local_step, n_unstable, flip_str))
 
     def update_barriers(self):
         scheme = 0 if self.softening_scheme == "isotropic" else 1
@@ -353,7 +362,7 @@ class AthermalSimulation:
                       curr_stress_val = sig_curr[stress_drop_component]
                       if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
                            if kmc_baseline_stress is not None:
-                                drop_frac = (kmc_baseline_stress - curr_stress_val) / kmc_baseline_stress if abs(kmc_baseline_stress) > 1e-6 else 0.0
+                                drop_frac = (abs(kmc_baseline_stress) - abs(curr_stress_val)) / abs(kmc_baseline_stress) if abs(kmc_baseline_stress) > 1e-6 else 0.0
                                 if drop_frac > stop_on_stress_drop:
                                      print(f"\n[ALERT] KMC Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% (Cumulative since start of KMC sequence) at step {step}")
                                      stop_drop_triggered = True
@@ -399,7 +408,7 @@ class AthermalSimulation:
                            lookback = max(1, stress_drop_lookback)
                            if len(stress_history) >= lookback:
                                 ref_stress = stress_history[-lookback]
-                                drop_frac = (ref_stress - curr_stress_val) / ref_stress if abs(ref_stress) > 1e-6 else 0.0
+                                drop_frac = (abs(ref_stress) - abs(curr_stress_val)) / abs(ref_stress) if abs(ref_stress) > 1e-6 else 0.0
                                 if drop_frac > stop_on_stress_drop:
                                      print(f"\n[ALERT] Elastic Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
                                      stop_drop_triggered = True
@@ -415,7 +424,8 @@ class AthermalSimulation:
              if stop_drop_triggered:
                   status_msg += " [SB DETECTED]"
              summary_line = f"{now:<20} {elapsed:<12.2f} {step:<8d} {last_step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {iteration_steps:<8d} {iteration_flips:<8d}\n"
-             with open(self.summary_log_path, "a") as f: f.write(summary_line)
+             if self._f_summary:
+                  self._f_summary.write(summary_line)
              
              should_save = checkpoint_interval and step % checkpoint_interval == 0 and checkpoint_mode in ["periodic", "current"]
              if should_save and checkpoint_elastic_only and last_step_type != "elastic": should_save = False
@@ -445,8 +455,10 @@ class AthermalSimulation:
         m, s = divmod(total_time, 60)
         h, m = divmod(m, 60)
         duration_str = f"\nSimulation Finish Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nTotal Duration: {total_time:.2f} seconds ({int(h):d}h {int(m):02d}m {int(s):02d}s)\n"
-        with open(self.summary_log_path, "a") as f: f.write(duration_str)
+        if self._f_summary:
+             self._f_summary.write(duration_str)
         if enable_console_log: print(duration_str)
+        self._close_logs()
 
     def run(self, *args, **kwargs):
         print("Use run_mixed instead.")
