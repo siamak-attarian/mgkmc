@@ -30,7 +30,8 @@ class AthermalSimulation:
                  stability_threshold=0.0, # eV, threshold for athermal instability
                  redraw_directions=True, # Redraw all modes in voxel after flip
                  redraw_barriers=True,    # Redraw all Q0 in voxel after flip
-                 max_cascade_steps_pct=0.3 # Stop cascade if steps > this pct of voxels
+                 max_cascade_steps_pct=0.3, # Stop cascade if steps > this pct of voxels
+                 nu0=1e13                  # Attempt frequency (Hz)
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -56,6 +57,7 @@ class AthermalSimulation:
         self.redraw_directions = redraw_directions
         self.redraw_barriers = redraw_barriers
         self.max_cascade_steps_pct = max_cascade_steps_pct
+        self.nu0 = nu0
         
         # Grid Setup (Arrays)
         self.grid_shape = (nx, ny, nz)
@@ -335,7 +337,7 @@ class AthermalSimulation:
                      iteration_flips += f
                      continue
                  
-                 rates_flat, indices_flat, total_rate = compute_rates(self.Q, self.volume, self.temperature)
+                 rates_flat, indices_flat, total_rate = compute_rates(self.Q, self.volume, self.temperature, self.nu0)
                  idx_flat, dt_kmc = select_event(rates_flat, total_rate)
                  trigger = np.exp(-dt_elastic / dt_kmc) if dt_kmc > 0 else 0.0
                  
