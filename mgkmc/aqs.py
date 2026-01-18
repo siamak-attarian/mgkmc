@@ -29,7 +29,8 @@ class AthermalSimulation:
                  strain_rate_sensitivity=0.0, # 's' exponent
                  stability_threshold=0.0, # eV, threshold for athermal instability
                  redraw_directions=True, # Redraw all modes in voxel after flip
-                 redraw_barriers=True    # Redraw all Q0 in voxel after flip
+                 redraw_barriers=True,    # Redraw all Q0 in voxel after flip
+                 max_cascade_steps_pct=0.3 # Stop cascade if steps > this pct of voxels
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -54,9 +55,11 @@ class AthermalSimulation:
         self.stability_threshold = stability_threshold
         self.redraw_directions = redraw_directions
         self.redraw_barriers = redraw_barriers
+        self.max_cascade_steps_pct = max_cascade_steps_pct
         
         # Grid Setup (Arrays)
         self.grid_shape = (nx, ny, nz)
+        self.total_voxels = nx * ny * nz
         
         # ================= SoA Arrays =================
         # 1. State Fields
@@ -254,8 +257,9 @@ class AthermalSimulation:
             )
             
             local_step += 1
-            if local_step > 20000:
-                 print("Cascade limit reached (20000 steps)")
+            max_cascade_steps = int(self.max_cascade_steps_pct * self.total_voxels)
+            if local_step > max_cascade_steps:
+                 print(f"Cascade limit reached ({local_step} steps > {self.max_cascade_steps_pct*100:.1f}% of {self.total_voxels} voxels)")
                  break
                  
         eps_curr = self.eps_field.mean(axis=(0,1,2))
@@ -275,7 +279,8 @@ class AthermalSimulation:
                   stress_drop_lookback=1,
                   enable_save_q=False,
                   save_q_interval=None,
-                  save_q_elastic_only=False):
+                  save_q_elastic_only=False,
+                  max_kmc_steps_pct=0.3):
         
         if not stress_targets:
              if component == (0,0):
@@ -316,6 +321,8 @@ class AthermalSimulation:
         
         last_step_type = "elastic"
         kmc_baseline_stress = None
+        sequential_kmc_steps = 0
+        max_sequential_kmc = int(max_kmc_steps_pct * self.total_voxels)
 
         while elastic_steps_done < n_global_steps:
              iteration_steps, iteration_flips = 0, 0
@@ -367,6 +374,12 @@ class AthermalSimulation:
                                      print(f"\n[ALERT] KMC Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% (Cumulative since start of KMC sequence) at step {step}")
                                      stop_drop_triggered = True
                       stress_history.append(curr_stress_val)
+                      sequential_kmc_steps += 1
+                      
+                      if sequential_kmc_steps > max_sequential_kmc:
+                           print(f"\n[TERMINATE] KMC sequence limit reached! {sequential_kmc_steps} consecutive steps > {max_kmc_steps_pct*100:.1f}% of {self.total_voxels} voxels.")
+                           return # Exit simulation
+                           
                       if stop_drop_triggered and kmc_mode == "accumulate": break
                       if kmc_mode == "on_demand": break
                  else:
@@ -400,6 +413,7 @@ class AthermalSimulation:
                       elastic_steps_done += 1
                       last_step_type = "elastic"
                       kmc_baseline_stress = None
+                      sequential_kmc_steps = 0
                       
                       # Stress drop detection for Elastic
                       sig_curr = self.sig_field.mean(axis=(0,1,2))
