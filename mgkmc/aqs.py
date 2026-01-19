@@ -262,11 +262,11 @@ class AthermalSimulation:
             max_cascade_steps = int(self.max_cascade_steps_pct * self.total_voxels)
             if local_step > max_cascade_steps:
                  print(f"Cascade limit reached ({local_step} steps > {self.max_cascade_steps_pct*100:.1f}% of {self.total_voxels} voxels)")
-                 break
+                 return local_step, total_flips, self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2)), True
                  
         eps_curr = self.eps_field.mean(axis=(0,1,2))
         sig_curr = self.sig_field.mean(axis=(0,1,2))
-        return local_step, total_flips, eps_curr, sig_curr
+        return local_step, total_flips, eps_curr, sig_curr, False
 
     def run_mixed(self, n_global_steps, strain_rate, component=(0,1), 
                   stress_targets={}, mixed_tol=1e-4, mixed_max_iter=50,
@@ -297,7 +297,8 @@ class AthermalSimulation:
         start_time_total = time.time()
         
         dt_elastic = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
-        _, _, eps_curr, sig_curr = self._run_cascade(global_step=0)
+        _, _, eps_curr, sig_curr, truncated = self._run_cascade(global_step=0)
+        if truncated: return
         
         if enable_save_q and save_q_interval is not None:
              np.save(os.path.join(self.output_dir, "Q_step_000000.npy"), self.Q)
@@ -332,10 +333,11 @@ class AthermalSimulation:
                  self.update_barriers()
                  unstable_indices = find_unstable(self.Q, self.stability_threshold)
                  if len(unstable_indices) > 0:
-                     l, f, _, _ = self._run_cascade(step)
-                     iteration_steps += l
-                     iteration_flips += f
-                     continue
+                    l, f, _, _, truncated = self._run_cascade(step)
+                    iteration_steps += l
+                    iteration_flips += f
+                    if truncated: return
+                    continue
                  
                  rates_flat, indices_flat, total_rate = compute_rates(self.Q, self.volume, self.temperature, self.nu0)
                  idx_flat, dt_kmc = select_event(rates_flat, total_rate)
@@ -394,9 +396,10 @@ class AthermalSimulation:
                       
                       converged = False
                       for it in range(mixed_max_iter):
-                          l, f, _, sig_M = self._run_cascade(step)
+                          l, f, _, sig_M, truncated = self._run_cascade(step)
                           iteration_steps += l
                           iteration_flips += f
+                          if truncated: return
                           stress_err_tensor = np.zeros((3,3))
                           max_err = 0.0
                           for idx_t, target_val in stress_targets.items():
