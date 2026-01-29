@@ -152,17 +152,17 @@ class AthermalSimulation:
         self._f_kmc = None # Lazy open
         
         if self._f_summary:
-            summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'SimTime(s)':<15} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8}\n"
+            summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}\n"
             self._f_summary.write(summary_header)
             self._f_summary.write("-" * len(summary_header) + "\n")
 
         if self._f_global:
-            header_fmt = "{:<10} {:<12} {:<10} {:<15} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
+            header_fmt = "{:<10} {:<12} {:<10} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17} {:<15}"
             headers = [
-                "GlobalStep", "ElasticStep", "KMCStep", "SimTime(s)",
+                "GlobalStep", "ElasticStep", "KMCStep",
                 "Eps_xx", "Eps_yy", "Eps_zz", "Eps_xy", "Eps_xz", "Eps_yz",
                 "Sig_xx(GPa)", "Sig_yy(GPa)", "Sig_zz(GPa)", "Sig_xy(GPa)", "Sig_xz(GPa)", "Sig_yz(GPa)",
-                "CascadeSteps", "TotalCascadeFlips"
+                "CascadeSteps", "TotalCascadeFlips", "SimTime(s)"
             ]
             self._f_global.write(header_fmt.format(*headers) + "\n")
             
@@ -178,15 +178,15 @@ class AthermalSimulation:
                 setattr(self, attr, None)
 
     def log_global(self, global_step, elastic_step, kmc_step, time_sim, eps, sig, cascade_steps, total_flips):
-        indices = [(0,0), (1,1), (2,2), (0,1), (0,2), (1,2)]
-        line_fmt = "{:<10d} {:<12d} {:<10d} {:<15.6e} " + " ".join(["{:<15.6e}"]*12) + " {:<14d} {:<17d}"
-        values = [global_step, elastic_step, kmc_step, time_sim]
-        values.extend([eps[i,j] for i,j in indices])
-        values.extend([sig[i,j]/1e9 for i,j in indices])
-        values.append(cascade_steps)
-        values.append(total_flips)
         if self._f_global:
-            self._f_global.write(line_fmt.format(*values) + "\n")
+            fmt = "{:<10d} {:<12d} {:<10d} " + " ".join(["{:<15.6f}"]*6) + " " + " ".join(["{:<15.3f}"]*6) + " {:<14d} {:<17d} {:<15.6e}\n"
+            data = [
+                global_step, elastic_step, kmc_step,
+                eps[0,0], eps[1,1], eps[2,2], eps[0,1], eps[0,2], eps[1,2],
+                sig[0,0]/1e9, sig[1,1]/1e9, sig[2,2]/1e9, sig[0,1]/1e9, sig[0,2]/1e9, sig[1,2]/1e9,
+                cascade_steps, total_flips, time_sim
+            ]
+            self._f_global.write(fmt.format(*data))
 
     def log_kmc(self, global_step, kmc_step, dt_kmc, dt_elastic, event_idx, barrier_ev):
         fmt_header = "{:<10} {:<10} {:<15} {:<15} {:<15} {:<20} {:<15}\n"
@@ -375,7 +375,7 @@ class AthermalSimulation:
             if stop_drop_triggered:
                 status_msg += " [SB DETECTED]"
             
-            summary_line = f"{now:<20} {elapsed:<12.2f} {self.time:<15.6e} {current_step:<8d} {step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {cascade_steps:<8d} {cascade_flips:<8d}\n"
+            summary_line = f"{now:<20} {elapsed:<12.2f} {current_step:<8d} {step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {cascade_steps:<8d} {cascade_flips:<8d} {self.time:<15.6e}\n"
             
             if self._f_summary:
                 self._f_summary.write(summary_line)
