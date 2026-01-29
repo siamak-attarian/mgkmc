@@ -1,3 +1,11 @@
 examples/*/
 __pycache__
 original_C_code
+simulation_results/
+*.txt
+*.npy
+*.h5
+*.png
+*.pkl
+*.db
+.vscode/

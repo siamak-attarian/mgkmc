@@ -1,0 +1,110 @@
+# Simulation Configuration for MGKMC
+# Units: Stresses in GPa, Strains are dimensionless, Temperature in K
+# Energy Barriers in eV, Voxel Size (Pixel) in nm
+
+# RNG Settings
+seed: 42
+
+# System Geometry
+system:
+  nx: 128
+  ny: 128
+  nz: 1
+  pixel: 0.7       # Voxel size (nm)
+  M: 20            # Number of shear orientations per voxel
+  gamma0: 0.14     # Reference strain
+  num_threads: 1   # [NEW] Number of threads for pyfftw
+
+# Material Properties
+# Supported modes: "constant", "generated", "file"
+material:
+  E:
+    mode: "constant"
+    value: 70     # Elastic constant
+  
+    # mode: "generated"
+    # parameters:
+      # mean: 70.0
+      # std: 5.0
+      # corr: 10
+      # clip_min: 50.0
+
+    
+    # Configuration for mode: "file"
+    # path: "path/to/E_field.npy"
+
+  nu:
+    mode: "constant"
+    value: 0.3     # Poisson's ratio
+    
+    # Configuration for mode: "generated"
+    # parameters:
+    #   mean: 0.3
+    #   std: 0.02
+    #   corr: 10
+    #   clip_min: 0.0
+    #   clip_max: 0.5
+
+# Physics & Softening
+physics:
+  enable_softening: true
+  softening_scheme: "directional" # "isotropic" or "directional"
+  jp: 20                          # Plastic-to-Softening coupling
+  jt: 20                          # Thermal-to-Softening coupling
+  softening_cap: 0.916            # Max softening (e.g., -log(0.4) ~ 0.916)
+  stability_threshold: 0.0        # Threshold for athermal instability check
+  redraw_directions: true         # [NEW] Redraw all mode directions in voxel after flip
+  redraw_barriers: true           # [NEW] Redraw all mode initial barriers (Q0) in voxel after flip
+
+# Barrier Generator
+barriers:
+  type: "gaussian"
+  kwargs:
+    mean: 2.00    # eV
+    std: 0.4      # eV
+    min_cutoff: 0.0
+
+# Simulation Dynamics
+dynamics:
+  temperature: 300.0              # Temperature (K)
+  physical_strain_rate: 1.0e7     # Physical strain rate (1/s)
+  eps_target: 0.14                # Target global strain
+  n_steps: 1400                   # Number of global loading steps
+  kmc_mode: "on_demand"           # "accumulate" or "on_demand"
+  nu0: 1.0e13                     # Attempt frequency (Hz)
+
+# Boundary Conditions
+boundary_conditions:
+  driving_component: [0, 0]       # Index [i, j] for driven strain component (0,0 is xx)
+  mixed_targets:                  # Stress targets for non-driven components (GPa)
+    "[1, 1]": 0.0                 # yy stress
+    "[2, 2]": 0.0                 # zz stress
+  mixed_tol: 1.0                  # Tolerance for stress convergence (MPa)
+
+# Output & Logging
+output:
+  directory: "simulation_results"
+  checkpoint_interval: 100
+  checkpoint_mode: "none"         # "periodic", "current", "last", or "none"
+  checkpoint_elastic_only: true  # [NEW] Only save checkpoints on elastic steps
+  enable_save_q: false            # [NEW] Explicit toggle for saving Q
+  save_q_interval: 1              # [NEW] Interval to save effective barriers (Q) as .npy files
+  save_q_elastic_only: true      # [NEW] Only save Q on elastic steps
+  enable_plotting: true
+  enable_console: true
+  summary_filename: "summary_log.txt"
+  enable_summary_log: true
+  enable_global_log: true
+  enable_cascade_log: true
+  enable_kmc_log: true
+  enable_config_backup: true
+
+
+# Detection Metrics
+detection:
+  stop_on_stress_drop: 0.20       # Drop fraction to stop (0.20 = 20%)
+  stop_post_drop_steps: 20        # Steps to continue after drop detection
+  ignore_drop_steps: 10           # Initial steps to ignore detection
+  stress_drop_lookback: 10         # Number of steps to look back for drop calculation
+  max_cascade_steps_pct: 0.3      # [NEW] Stop cascade if steps > 30% of voxels
+  max_kmc_steps_pct: 0.3          # [NEW] Stop if sequential KMC steps > 30% of voxels
