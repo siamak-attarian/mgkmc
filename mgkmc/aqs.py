@@ -119,33 +119,43 @@ class AthermalSimulation:
         self.history_global = [] 
         self.solver_args = {}
 
-    def _init_logs(self, summary_filename="summary_log.txt"):
+    def _init_logs(self, summary_filename="summary_log.txt", 
+                   enable_summary_log=True, enable_global_log=True, 
+                   enable_cascade_log=True, enable_kmc_log=True):
         self.log_global_path = os.path.join(self.output_dir, "global_log.txt")
         self.cascade_log_path = os.path.join(self.output_dir, "cascade_log.txt")
         self.summary_log_path = os.path.join(self.output_dir, summary_filename)
         self.kmc_log_path = os.path.join(self.output_dir, "kmc_log.txt")
         
+        self.enable_summary_log = enable_summary_log
+        self.enable_global_log = enable_global_log
+        self.enable_cascade_log = enable_cascade_log
+        self.enable_kmc_log = enable_kmc_log
+
         # Open handles with line buffering to reduce disk hits on WSL/NTFS
-        self._f_global = open(self.log_global_path, "w", buffering=1)
-        self._f_cascade = open(self.cascade_log_path, "w", buffering=1)
-        self._f_summary = open(self.summary_log_path, "w", buffering=1)
+        self._f_global = open(self.log_global_path, "w", buffering=1) if enable_global_log else None
+        self._f_cascade = open(self.cascade_log_path, "w", buffering=1) if enable_cascade_log else None
+        self._f_summary = open(self.summary_log_path, "w", buffering=1) if enable_summary_log else None
         self._f_kmc = None # Lazy open
         
-        summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8}\n"
-        self._f_summary.write(summary_header)
-        self._f_summary.write("-" * len(summary_header) + "\n")
+        if self._f_summary:
+            summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8}\n"
+            self._f_summary.write(summary_header)
+            self._f_summary.write("-" * len(summary_header) + "\n")
 
-        header_fmt = "{:<10} {:<12} {:<10} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
-        headers = [
-            "GlobalStep", "ElasticStep", "KMCStep",
-            "Eps_xx", "Eps_yy", "Eps_zz", "Eps_xy", "Eps_xz", "Eps_yz",
-            "Sig_xx(GPa)", "Sig_yy(GPa)", "Sig_zz(GPa)", "Sig_xy(GPa)", "Sig_xz(GPa)", "Sig_yz(GPa)",
-            "CascadeSteps", "TotalCascadeFlips"
-        ]
-        self._f_global.write(header_fmt.format(*headers) + "\n")
+        if self._f_global:
+            header_fmt = "{:<10} {:<12} {:<10} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
+            headers = [
+                "GlobalStep", "ElasticStep", "KMCStep",
+                "Eps_xx", "Eps_yy", "Eps_zz", "Eps_xy", "Eps_xz", "Eps_yz",
+                "Sig_xx(GPa)", "Sig_yy(GPa)", "Sig_zz(GPa)", "Sig_xy(GPa)", "Sig_xz(GPa)", "Sig_yz(GPa)",
+                "CascadeSteps", "TotalCascadeFlips"
+            ]
+            self._f_global.write(header_fmt.format(*headers) + "\n")
             
-        cascade_header_fmt = "{:<12} {:<12} {:<15} {:<30}"
-        self._f_cascade.write(cascade_header_fmt.format("GlobalStep", "LocalStep", "NumUnstable", "FlippedVoxels(x,y,z,mode)") + "\n")
+        if self._f_cascade:
+            cascade_header_fmt = "{:<12} {:<12} {:<15} {:<30}"
+            self._f_cascade.write(cascade_header_fmt.format("GlobalStep", "LocalStep", "NumUnstable", "FlippedVoxels(x,y,z,mode)") + "\n")
 
     def _close_logs(self):
         for attr in ['_f_global', '_f_cascade', '_f_summary', '_f_kmc']:
@@ -170,6 +180,8 @@ class AthermalSimulation:
         fmt_data   = "{:<10d} {:<10d} {:<15.6e} {:<15.6e} {:<15.6e} {:<20} {:<15.6f}\n"
         
         if self._f_kmc is None:
+            if not self.enable_kmc_log:
+                return
             if not os.path.exists(self.kmc_log_path):
                  with open(self.kmc_log_path, "w") as f:
                       f.write(fmt_header.format("GlobalStep", "KMCStep", "DtElastic", "DtKMC", "e^(-DtE/DtK)", "Event(x,y,z,m)", "Barrier(eV)"))
@@ -282,7 +294,11 @@ class AthermalSimulation:
                   enable_save_q=False,
                   save_q_interval=None,
                   save_q_elastic_only=False,
-                  max_kmc_steps_pct=0.3):
+                  max_kmc_steps_pct=0.3,
+                  enable_summary_log=True,
+                  enable_global_log=True,
+                  enable_cascade_log=True,
+                  enable_kmc_log=True):
         
         if not stress_targets:
              if component == (0,0):
@@ -293,7 +309,11 @@ class AthermalSimulation:
                  stress_targets[(1,1)] = 0.0
                  stress_targets[(2,2)] = 0.0
 
-        self._init_logs(summary_filename=summary_filename)
+        self._init_logs(summary_filename=summary_filename,
+                        enable_summary_log=enable_summary_log,
+                        enable_global_log=enable_global_log,
+                        enable_cascade_log=enable_cascade_log,
+                        enable_kmc_log=enable_kmc_log)
         start_time_total = time.time()
         
         dt_elastic = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
