@@ -31,7 +31,8 @@ class AthermalSimulation:
                  redraw_directions=True, # Redraw all modes in voxel after flip
                  redraw_barriers=True,    # Redraw all Q0 in voxel after flip
                  max_cascade_steps_pct=0.3, # Stop cascade if steps > this pct of voxels
-                 nu0=1e13                  # Attempt frequency (Hz)
+                 nu0=1e13,                 # Attempt frequency (Hz)
+                 q_act_temp=0.37           # Activation barrier for JT recovery (eV)
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -58,6 +59,18 @@ class AthermalSimulation:
         self.redraw_barriers = redraw_barriers
         self.max_cascade_steps_pct = max_cascade_steps_pct
         self.nu0 = nu0
+        self.q_act_temp = q_act_temp
+
+        # Dynamic calculation of tau if not provided
+        if self.temperature > 0 and (self.tau is None or self.tau == np.inf):
+            kB = 8.617e-5 # eV/K
+            # tau = 1 / (nu0 * exp(-q_act_temp / (kB * T)))
+            self.tau = 1.0 / (self.nu0 * np.exp(-self.q_act_temp / (kB * self.temperature)))
+            print(f"Calculated Dynamic Softening Decay Time Constant (tau): {self.tau:.4e} s")
+        elif self.tau == np.inf:
+            print("Softening Decay Time Constant (tau): Infinite (No decay)")
+        else:
+            print(f"Using Provided Softening Decay Time Constant (tau): {self.tau:.4e} s")
         
         # Grid Setup (Arrays)
         self.grid_shape = (nx, ny, nz)
@@ -139,14 +152,14 @@ class AthermalSimulation:
         self._f_kmc = None # Lazy open
         
         if self._f_summary:
-            summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8}\n"
+            summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'SimTime(s)':<15} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8}\n"
             self._f_summary.write(summary_header)
             self._f_summary.write("-" * len(summary_header) + "\n")
 
         if self._f_global:
-            header_fmt = "{:<10} {:<12} {:<10} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
+            header_fmt = "{:<10} {:<12} {:<10} {:<15} " + " ".join(["{:<15}"]*12) + " {:<14} {:<17}"
             headers = [
-                "GlobalStep", "ElasticStep", "KMCStep",
+                "GlobalStep", "ElasticStep", "KMCStep", "SimTime(s)",
                 "Eps_xx", "Eps_yy", "Eps_zz", "Eps_xy", "Eps_xz", "Eps_yz",
                 "Sig_xx(GPa)", "Sig_yy(GPa)", "Sig_zz(GPa)", "Sig_xy(GPa)", "Sig_xz(GPa)", "Sig_yz(GPa)",
                 "CascadeSteps", "TotalCascadeFlips"
@@ -164,10 +177,10 @@ class AthermalSimulation:
                 f.close()
                 setattr(self, attr, None)
 
-    def log_global(self, global_step, elastic_step, kmc_step, eps, sig, cascade_steps, total_flips):
+    def log_global(self, global_step, elastic_step, kmc_step, time_sim, eps, sig, cascade_steps, total_flips):
         indices = [(0,0), (1,1), (2,2), (0,1), (0,2), (1,2)]
-        line_fmt = "{:<10d} {:<12d} {:<10d} " + " ".join(["{:<15.6e}"]*12) + " {:<14d} {:<17d}"
-        values = [global_step, elastic_step, kmc_step]
+        line_fmt = "{:<10d} {:<12d} {:<10d} {:<15.6e} " + " ".join(["{:<15.6e}"]*12) + " {:<14d} {:<17d}"
+        values = [global_step, elastic_step, kmc_step, time_sim]
         values.extend([eps[i,j] for i,j in indices])
         values.extend([sig[i,j]/1e9 for i,j in indices])
         values.append(cascade_steps)
@@ -187,7 +200,9 @@ class AthermalSimulation:
                       f.write(fmt_header.format("GlobalStep", "KMCStep", "DtElastic", "DtKMC", "e^(-DtE/DtK)", "Event(x,y,z,m)", "Barrier(eV)"))
             self._f_kmc = open(self.kmc_log_path, "a", buffering=1)
 
-        ratio = np.exp(-dt_elastic / dt_kmc) if dt_kmc > 0 else 0.0
+        # dt_elastic here refers to the time duration of the elastic increment that was being processed
+        # dt_kmc here refers to the actual waiting time for the KMC event
+        ratio = np.exp(-dt_elastic / dt_kmc) if dt_kmc > 0 else 0.0 # This ratio is not directly used in the new scheme, but kept for log consistency
         x, y, z, m = event_idx
         event_str = f"({x},{y},{z},{m})"
         self._f_kmc.write(fmt_data.format(global_step, kmc_step, dt_elastic, dt_kmc, ratio, event_str, barrier_ev))
@@ -316,7 +331,8 @@ class AthermalSimulation:
                         enable_kmc_log=enable_kmc_log)
         start_time_total = time.time()
         
-        dt_elastic = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
+        # dt_elastic_increment is the time duration for one macroscopic elastic strain increment
+        dt_elastic_increment = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
         _, _, eps_curr, sig_curr, truncated = self._run_cascade(global_step=0)
         if truncated: return
         
@@ -349,7 +365,9 @@ class AthermalSimulation:
 
         while elastic_steps_done < n_global_steps:
              iteration_steps, iteration_flips = 0, 0
-             while True:
+             remaining_time = dt_elastic_increment # Time left in the current macroscopic elastic increment
+             
+             while remaining_time > 0:
                  self.update_barriers()
                  unstable_indices = find_unstable(self.Q, self.stability_threshold)
                  if len(unstable_indices) > 0:
@@ -357,112 +375,130 @@ class AthermalSimulation:
                     iteration_steps += l
                     iteration_flips += f
                     if truncated: return
+                    # After cascade, re-evaluate KMC rates for the remaining time
                     continue
                  
                  rates_flat, indices_flat, total_rate = compute_rates(self.Q, self.volume, self.temperature, self.nu0)
-                 idx_flat, dt_kmc = select_event(rates_flat, total_rate)
-                 trigger = np.exp(-dt_elastic / dt_kmc) if dt_kmc > 0 else 0.0
                  
-                 if self.temperature > 0 and np.random.uniform() > trigger:
-                      if idx_flat == -1: continue 
-                      x, y, z, m = decode_index(indices_flat[idx_flat], self.grid_shape[1], self.grid_shape[2], self.M)
-                      barrier_val = self.Q[x,y,z,m]
-                      apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
-                                     self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap)
-                      self.prev_strain_dir[x,y,z] = self.catalog[x,y,z,m]
+                 if self.temperature > 0 and total_rate > 0:
+                      # Use standard KMC waiting time (Poisson process)
+                      u = np.random.uniform()
+                      t_wait = -np.log(u) / total_rate
                       
-                      if self.redraw_directions or self.redraw_barriers:
-                           if self.redraw_directions: self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
-                           if self.redraw_barriers: self.Q0[x,y,z] = self.barrier_generator((self.M,))
-                      else:
-                           self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
-                           self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
-                      
-                      self.log_kmc(step, total_kmc_steps, dt_kmc, dt_elastic, (x,y,z,m), barrier_val)
-                      self.time += dt_kmc
-                      total_kmc_steps += 1
-                      last_step_type = "kmc"
-                      if kmc_baseline_stress is None:
-                           kmc_baseline_stress = sig_curr[stress_drop_component]
-                      
-                      self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                           self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
-                      
-                      # Stress drop detection for KMC
-                      sig_curr = self.sig_field.mean(axis=(0,1,2))
-                      curr_stress_val = sig_curr[stress_drop_component]
-                      if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
-                           if kmc_baseline_stress is not None:
+                      # Competition: does event happen before the rest of this elastic increment?
+                      if t_wait < remaining_time:
+                           # Thermal event wins
+                           idx_flat, _ = select_event(rates_flat, total_rate) # Selects one event based on rates
+                           if idx_flat == -1: # Should not happen if total_rate > 0, but as a safeguard
+                                self.time += remaining_time
+                                remaining_time = 0
+                                continue
+                           
+                           x, y, z, m = decode_index(indices_flat[idx_flat], self.grid_shape[1], self.grid_shape[2], self.M)
+                           barrier_val = self.Q[x,y,z,m]
+                           apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
+                                          self.catalog, x, y, z, m, self.time + t_wait, self.jp, self.jt, self.softening_cap)
+                           self.prev_strain_dir[x,y,z] = self.catalog[x,y,z,m]
+                           
+                           if self.redraw_directions or self.redraw_barriers:
+                                if self.redraw_directions: self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
+                                if self.redraw_barriers: self.Q0[x,y,z] = self.barrier_generator((self.M,))
+                           else:
+                                self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
+                                self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
+                           
+                           self.log_kmc(step, total_kmc_steps, remaining_time, t_wait, (x,y,z,m), barrier_val)
+                           self.time += t_wait
+                           remaining_time -= t_wait
+                           total_kmc_steps += 1
+                           last_step_type = "kmc"
+                           
+                           # Recompute stress after thermal relaxation
+                           self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
+                           
+                           # Stress drop detection for KMC
+                           sig_curr = self.sig_field.mean(axis=(0,1,2))
+                           curr_stress_val = sig_curr[stress_drop_component]
+                           if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
+                                if kmc_baseline_stress is None:
+                                     kmc_baseline_stress = curr_stress_val 
                                 drop_frac = (abs(kmc_baseline_stress) - abs(curr_stress_val)) / abs(kmc_baseline_stress) if abs(kmc_baseline_stress) > 1e-6 else 0.0
                                 if drop_frac > stop_on_stress_drop:
                                      print(f"\n[ALERT] KMC Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% (Cumulative since start of KMC sequence) at step {step}")
                                      stop_drop_triggered = True
-                      stress_history.append(curr_stress_val)
-                      sequential_kmc_steps += 1
-                      
-                      if sequential_kmc_steps > max_sequential_kmc:
-                           print(f"\n[TERMINATE] KMC sequence limit reached! {sequential_kmc_steps} consecutive steps > {max_kmc_steps_pct*100:.1f}% of {self.total_voxels} voxels.")
-                           return # Exit simulation
                            
-                      if stop_drop_triggered and kmc_mode == "accumulate": break
-                      if kmc_mode == "on_demand": break
+                           stress_history.append(curr_stress_val)
+                           sequential_kmc_steps += 1
+                           
+                           if sequential_kmc_steps > max_sequential_kmc:
+                                print(f"\n[TERMINATE] KMC sequence limit reached! {sequential_kmc_steps} consecutive steps.")
+                                return
+                           continue
+                      else:
+                           # Elastic loading wins (uses up remaining time)
+                           self.time += remaining_time
+                           remaining_time = 0
                  else:
-                      self.time += dt_elastic
-                      eps_inc = np.zeros((3,3))
-                      eps_inc[component] = strain_rate
-                      self.eps_macro += eps_inc
-                      self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                           self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
+                      # Zero temperature or zero rate -> strictly elastic
+                      self.time += remaining_time
+                      remaining_time = 0
                       
-                      converged = False
-                      for it in range(mixed_max_iter):
-                          l, f, _, sig_M, truncated = self._run_cascade(step)
-                          iteration_steps += l
-                          iteration_flips += f
-                          if truncated: return
-                          stress_err_tensor = np.zeros((3,3))
-                          max_err = 0.0
-                          for idx_t, target_val in stress_targets.items():
-                              err = target_val - sig_M[idx_t]
-                              stress_err_tensor[idx_t] = err
-                              max_err = max(max_err, abs(err))
-                          if max_err < mixed_tol:
-                              converged = True
-                              break
-                          eps_corr = get_correction_legacy(stress_err_tensor)
-                          eps_corr[component] = 0.0
-                          self.eps_macro += eps_corr
-                          self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                               self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
-                      if not converged: print(f"Warning: Mixed loop did not converge at step {step} (Err={max_err:.2e})")
-                      elastic_steps_done += 1
-                      last_step_type = "elastic"
-                      kmc_baseline_stress = None
-                      sequential_kmc_steps = 0
-                      
-                      # Stress drop detection for Elastic
-                      sig_curr = self.sig_field.mean(axis=(0,1,2))
-                      curr_stress_val = sig_curr[stress_drop_component]
-                      if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
-                           lookback = max(1, stress_drop_lookback)
-                           if len(stress_history) >= lookback:
-                                ref_stress = stress_history[-lookback]
-                                drop_frac = (abs(ref_stress) - abs(curr_stress_val)) / abs(ref_stress) if abs(ref_stress) > 1e-6 else 0.0
-                                if drop_frac > stop_on_stress_drop:
-                                     print(f"\n[ALERT] Elastic Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
-                                     stop_drop_triggered = True
-                      stress_history.append(curr_stress_val)
-                      break
+             # Apply full elastic increment
+             eps_inc = np.zeros((3,3))
+             eps_inc[component] = strain_rate
+             self.eps_macro += eps_inc
+             self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                  self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
+             
+             converged = False
+             for it in range(mixed_max_iter):
+                 l, f, _, sig_M, truncated = self._run_cascade(step)
+                 iteration_steps += l
+                 iteration_flips += f
+                 if truncated: return
+                 stress_err_tensor = np.zeros((3,3))
+                 max_err = 0.0
+                 for idx_t, target_val in stress_targets.items():
+                     err = target_val - sig_M[idx_t]
+                     stress_err_tensor[idx_t] = err
+                     max_err = max(max_err, abs(err))
+                 if max_err < mixed_tol:
+                     converged = True
+                     break
+                 eps_corr = get_correction_legacy(stress_err_tensor)
+                 eps_corr[component] = 0.0
+                 self.eps_macro += eps_corr
+                 self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                      self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
+             if not converged: print(f"Warning: Mixed loop did not converge at step {step} (Err={max_err:.2e})")
+             elastic_steps_done += 1
+             last_step_type = "elastic"
+             kmc_baseline_stress = None
+             sequential_kmc_steps = 0
+             
+             # Stress drop detection for Elastic
+             sig_curr = self.sig_field.mean(axis=(0,1,2))
+             curr_stress_val = sig_curr[stress_drop_component]
+             if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
+                  lookback = max(1, stress_drop_lookback)
+                  if len(stress_history) >= lookback:
+                       ref_stress = stress_history[-lookback]
+                       drop_frac = (abs(ref_stress) - abs(curr_stress_val)) / abs(ref_stress) if abs(ref_stress) > 1e-6 else 0.0
+                       if drop_frac > stop_on_stress_drop:
+                            print(f"\n[ALERT] Elastic Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
+                            stop_drop_triggered = True
+             stress_history.append(curr_stress_val)
              
              eps_curr, sig_curr = self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2))
-             self.log_global(step, elastic_steps_done, total_kmc_steps, eps_curr, sig_curr, iteration_steps, iteration_flips)
+             self.log_global(step, elastic_steps_done, total_kmc_steps, self.time, eps_curr, sig_curr, iteration_steps, iteration_flips)
              self.history_global.append((eps_curr[0,0], sig_curr[0,0]/1e9))
              curr_stress_val, curr_strain_val = sig_curr[stress_drop_component], eps_curr[stress_drop_component]
              now, elapsed = datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time_total
-             status_msg = f"[{now}] [{elapsed:8.2f}s] Step {step:4d}: Type={last_step_type.upper():<8}, KMC={total_kmc_steps:4d}, Cascade={iteration_steps:4d}, Flips={iteration_flips:4d}, Eps_xx={curr_strain_val:8.6f}, Sig_xx={curr_stress_val/1e9:6.3f} GPa"
+             status_msg = f"[{now}] [{elapsed:7.1f}s | {self.time:8.2e}s] Step {step:4d}: Type={last_step_type.upper():<8}, KMC={total_kmc_steps:4d}, Cascade={iteration_steps:d}, Eps_xx={curr_strain_val:8.6f}, Sig={curr_stress_val/1e9:6.3f} GPa"
              if stop_drop_triggered:
                   status_msg += " [SB DETECTED]"
-             summary_line = f"{now:<20} {elapsed:<12.2f} {step:<8d} {last_step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {iteration_steps:<8d} {iteration_flips:<8d}\n"
+             summary_line = f"{now:<20} {elapsed:<12.2f} {self.time:<15.6e} {step:<8d} {last_step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {iteration_steps:<8d} {iteration_flips:<8d}\n"
              if self._f_summary:
                   self._f_summary.write(summary_line)
              
@@ -473,7 +509,7 @@ class AthermalSimulation:
                             (f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5" if checkpoint_elastic_only else f"{checkpoint_path}_{step:06d}.h5")
                   if checkpoint_elastic_only: elastic_chk_id += 1
                   self.save_checkpoint(cp_name, step=step)
-
+    
              if enable_save_q and save_q_interval and step % save_q_interval == 0:
                   should_save_q = True
                   if save_q_elastic_only and last_step_type != "elastic":
@@ -515,6 +551,16 @@ class AthermalSimulation:
                      meta.attrs['nx'], meta.attrs['ny'], meta.attrs['nz'] = self.grid_shape
                      meta.attrs['M'], meta.attrs['gamma0'], meta.attrs['pixel'] = self.M, self.gamma0, self.pixel
                      meta.attrs['timestamp'], meta.attrs['step'] = datetime.now().isoformat(), step if step is not None else 0
+                     meta.attrs['sim_time'] = self.time
+                     meta.attrs['nu0'] = self.nu0
+                     meta.attrs['q_act_temp'] = self.q_act_temp
+                     meta.attrs['temperature'] = self.temperature
+                     meta.attrs['strain_rate'] = self.strain_rate
+                     meta.attrs['stability_threshold'] = self.stability_threshold
+                     meta.attrs['jp'] = self.jp
+                     meta.attrs['jt'] = self.jt
+                     meta.attrs['softening_cap'] = self.softening_cap
+                     meta.attrs['softening_scheme'] = self.softening_scheme
                      fields = f.create_group('fields')
                      fields.create_dataset('eps_field', data=self.eps_field, compression='gzip')
                      fields.create_dataset('sig_field', data=self.sig_field, compression='gzip')
@@ -527,7 +573,52 @@ class AthermalSimulation:
                      grid.create_dataset('Q0', data=self.Q0, compression='gzip')
                      grid.create_dataset('catalog', data=self.catalog, compression='gzip')
                      grid.create_dataset('last_event_time', data=self.last_event_time, compression='gzip')
+                     
+                     state = f.create_group('state')
+                     state.create_dataset('eps_macro', data=self.eps_macro)
                  return
              except (ImportError, Exception) as e:
                  if attempt < max_retries - 1: time.sleep(0.5)
                  else: print(f"Error saving checkpoint after {max_retries} attempts: {e}")
+
+    @classmethod
+    def load_checkpoint(cls, path):
+         """
+         Load AthermalSimulation from an HDF5 checkpoint.
+         """
+         import h5py
+         with h5py.File(path, "r") as f:
+             meta = f['metadata']
+             nx, ny, nz = meta.attrs['nx'], meta.attrs['ny'], meta.attrs['nz']
+             M, gamma0, pixel = meta.attrs['M'], meta.attrs['gamma0'], meta.attrs['pixel']
+             
+             # Fields
+             fields = f['fields']
+             E_field = fields['E_field'][:]
+             nu_field = fields['nu_field'][:]
+             
+             # Create instance
+             sim = cls(nx, ny, nz, M=M, gamma0=gamma0, E_field=E_field, nu_field=nu_field, 
+                       pixel=pixel, temperature=meta.attrs['temperature'], 
+                       strain_rate=meta.attrs['strain_rate'], jp=meta.attrs['jp'], jt=meta.attrs['jt'],
+                       softening_cap=meta.attrs['softening_cap'], softening_scheme=meta.attrs['softening_scheme'],
+                       nu0=meta.attrs.get('nu0', 1e13), q_act_temp=meta.attrs.get('q_act_temp', 0.37))
+             
+             # Restore dynamic state
+             sim.time = meta.attrs.get('sim_time', 0.0)
+             sim.eps_field = fields['eps_field'][:]
+             sim.sig_field = fields['sig_field'][:]
+             
+             grid = f['grid']
+             sim.eps_plastic = grid['eps_plastic'][:]
+             sim.soft_prop = grid['soft_prop'][:]
+             sim.Q = grid['Q'][:]
+             sim.Q0 = grid['Q0'][:]
+             sim.catalog = grid['catalog'][:]
+             sim.last_event_time = grid['last_event_time'][:]
+             
+             if 'state' in f:
+                  sim.eps_macro = f['state']['eps_macro'][:]
+                  
+             print(f"Loaded checkpoint from {path} (SimTime={sim.time:.4e}s, Step={meta.attrs['step']})")
+             return sim

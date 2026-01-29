@@ -123,7 +123,8 @@ def main():
         redraw_directions=phys_cfg.get('redraw_directions', True),
         redraw_barriers=phys_cfg.get('redraw_barriers', True),
         max_cascade_steps_pct=float(det_cfg.get('max_cascade_steps_pct', 0.3)),
-        nu0=float(dyn_cfg.get('nu0', 1e13))
+        nu0=float(dyn_cfg.get('nu0', 1e13)),
+        q_act_temp=float(phys_cfg.get('q_act_temp', 0.37))
     )
 
     # 5. Run Mixed BC Simulation
