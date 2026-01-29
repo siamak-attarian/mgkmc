@@ -363,6 +363,27 @@ class AthermalSimulation:
         sequential_kmc_steps = 0
         max_sequential_kmc = int(max_kmc_steps_pct * self.total_voxels)
 
+        def _do_logging(current_step, step_type, cascade_steps, cascade_flips):
+            eps_curr, sig_curr = self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2))
+            self.log_global(current_step, elastic_steps_done, total_kmc_steps, self.time, eps_curr, sig_curr, cascade_steps, cascade_flips)
+            self.history_global.append((eps_curr[0,0], sig_curr[0,0]/1e9))
+            
+            curr_stress_val, curr_strain_val = sig_curr[stress_drop_component], eps_curr[stress_drop_component]
+            now, elapsed = datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time_total
+            
+            status_msg = f"[{now}] [{elapsed:7.1f}s | {self.time:8.2e}s] Step {current_step:4d}: Type={step_type.upper():<8}, KMC={total_kmc_steps:4d}, Cascade={cascade_steps:d}, Eps_xx={curr_strain_val:8.6f}, Sig={curr_stress_val/1e9:6.3f} GPa"
+            if stop_drop_triggered:
+                status_msg += " [SB DETECTED]"
+            
+            summary_line = f"{now:<20} {elapsed:<12.2f} {self.time:<15.6e} {current_step:<8d} {step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {cascade_steps:<8d} {cascade_flips:<8d}\n"
+            
+            if self._f_summary:
+                self._f_summary.write(summary_line)
+            if enable_console_log:
+                print(status_msg)
+            
+            return curr_stress_val
+
         while elastic_steps_done < n_global_steps:
              iteration_steps, iteration_flips = 0, 0
              remaining_time = dt_elastic_increment # Time left in the current macroscopic elastic increment
@@ -417,9 +438,10 @@ class AthermalSimulation:
                            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
                                 self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
                            
+                           # Log this KMC event specifically
+                           curr_stress_val = _do_logging(step, "kmc", 0, 0) # Individual KMC has 0 cascade steps here
+                           
                            # Stress drop detection for KMC
-                           sig_curr = self.sig_field.mean(axis=(0,1,2))
-                           curr_stress_val = sig_curr[stress_drop_component]
                            if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
                                 if kmc_baseline_stress is None:
                                      kmc_baseline_stress = curr_stress_val 
@@ -430,6 +452,7 @@ class AthermalSimulation:
                            
                            stress_history.append(curr_stress_val)
                            sequential_kmc_steps += 1
+                           step += 1 # KMC counts as a step
                            
                            if sequential_kmc_steps > max_sequential_kmc:
                                 print(f"\n[TERMINATE] KMC sequence limit reached! {sequential_kmc_steps} consecutive steps.")
@@ -477,9 +500,10 @@ class AthermalSimulation:
              kmc_baseline_stress = None
              sequential_kmc_steps = 0
              
+             # Final logging for this elastic step
+             curr_stress_val = _do_logging(step, "elastic", iteration_steps, iteration_flips)
+             
              # Stress drop detection for Elastic
-             sig_curr = self.sig_field.mean(axis=(0,1,2))
-             curr_stress_val = sig_curr[stress_drop_component]
              if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
                   lookback = max(1, stress_drop_lookback)
                   if len(stress_history) >= lookback:
@@ -489,18 +513,6 @@ class AthermalSimulation:
                             print(f"\n[ALERT] Elastic Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
                             stop_drop_triggered = True
              stress_history.append(curr_stress_val)
-             
-             eps_curr, sig_curr = self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2))
-             self.log_global(step, elastic_steps_done, total_kmc_steps, self.time, eps_curr, sig_curr, iteration_steps, iteration_flips)
-             self.history_global.append((eps_curr[0,0], sig_curr[0,0]/1e9))
-             curr_stress_val, curr_strain_val = sig_curr[stress_drop_component], eps_curr[stress_drop_component]
-             now, elapsed = datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time_total
-             status_msg = f"[{now}] [{elapsed:7.1f}s | {self.time:8.2e}s] Step {step:4d}: Type={last_step_type.upper():<8}, KMC={total_kmc_steps:4d}, Cascade={iteration_steps:d}, Eps_xx={curr_strain_val:8.6f}, Sig={curr_stress_val/1e9:6.3f} GPa"
-             if stop_drop_triggered:
-                  status_msg += " [SB DETECTED]"
-             summary_line = f"{now:<20} {elapsed:<12.2f} {self.time:<15.6e} {step:<8d} {last_step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {iteration_steps:<8d} {iteration_flips:<8d}\n"
-             if self._f_summary:
-                  self._f_summary.write(summary_line)
              
              should_save = checkpoint_interval and step % checkpoint_interval == 0 and checkpoint_mode in ["periodic", "current"]
              if should_save and checkpoint_elastic_only and last_step_type != "elastic": should_save = False
