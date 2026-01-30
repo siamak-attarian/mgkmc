@@ -546,7 +546,6 @@ class AthermalSimulation:
                        should_save_q = False
                   if should_save_q:
                        np.save(os.path.join(self.output_dir, f"Q_step_{step:06d}.npy"), self.Q)
-             if enable_console_log: print(status_msg)
              if stop_drop_triggered:
                   if stop_countdown > 0: stop_countdown -= 1
                   else: print(f"Stopping criteria: {stop_post_drop_steps} steps after detection."); break
