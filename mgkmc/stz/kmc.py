@@ -71,7 +71,7 @@ def select_event(rates, total_rate):
     Select event index from rates array.
     """
     if total_rate <= 0:
-        return -1, np.inf
+        return -1
         
     r = np.random.uniform(0, total_rate)
     
@@ -79,10 +79,9 @@ def select_event(rates, total_rate):
     for i in range(len(rates)):
         current_sum += rates[i]
         if current_sum >= r:
-            dt = 1.0 / total_rate
-            return i, dt
+            return i
             
-    return len(rates)-1, 1.0/total_rate
+    return len(rates)-1
 
 @jit(nopython=True, cache=True)
 def decode_index(flat_idx, ny, nz, M):

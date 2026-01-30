@@ -297,7 +297,6 @@ class AthermalSimulation:
 
     def run_mixed(self, n_global_steps, strain_rate, component=(0,1), 
                   stress_targets={}, mixed_tol=1e-4, mixed_max_iter=50,
-                  kmc_mode="accumulate", 
                   checkpoint_interval=None, checkpoint_path="checkpoint", 
                   checkpoint_mode="periodic", 
                   stop_on_stress_drop=None, stress_drop_component=(0,1), stop_post_drop_steps=20,
@@ -338,6 +337,10 @@ class AthermalSimulation:
         
         if enable_save_q and save_q_interval is not None:
              np.save(os.path.join(self.output_dir, "Q_step_000000.npy"), self.Q)
+
+        # Pre-calculate unit strain tensor for loading
+        strain_unit_tensor = np.zeros((3,3))
+        strain_unit_tensor[component] = 1.0
 
         elastic_chk_id = 0
         if checkpoint_interval is not None and checkpoint_mode in ["periodic", "current"]:
@@ -409,8 +412,14 @@ class AthermalSimulation:
                       # Competition: does event happen before the rest of this elastic increment?
                       if t_wait < remaining_time:
                            # Thermal event wins
-                           idx_flat, _ = select_event(rates_flat, total_rate) # Selects one event based on rates
+                           # Apply partial strain for the time that passed
+                           d_eps = strain_unit_tensor * (self.strain_rate * t_wait)
+                           self.eps_macro += d_eps
+
+                           idx_flat = select_event(rates_flat, total_rate) # Selects one event based on rates
                            if idx_flat == -1: # Should not happen if total_rate > 0, but as a safeguard
+                                # We already advanced eps_macro, but no event. 
+                                # Time will be advanced below.
                                 self.time += remaining_time
                                 remaining_time = 0
                                 continue
@@ -434,12 +443,20 @@ class AthermalSimulation:
                            total_kmc_steps += 1
                            last_step_type = "kmc"
                            
-                           # Recompute stress after thermal relaxation
-                           self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
+                           # Check for immediate cascades triggered by this KMC event
+                           l_kmc, f_kmc, _, _, truncated = self._run_cascade(step)
+                           if truncated: return
                            
-                           # Log this KMC event specifically
-                           curr_stress_val = _do_logging(step, "kmc", 0, 0) # Individual KMC has 0 cascade steps here
+                           # If no cascade happened, we still need to recompute stress for the lone KMC flip
+                           if l_kmc == 0:
+                               self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                                    self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
+                           
+                           # Log this KMC event specifically, including any cascades that happened just before or as a result of it
+                           curr_stress_val = _do_logging(step, "kmc", iteration_steps + l_kmc, iteration_flips + f_kmc)
+                           
+                           # Reset accumulators for the rest of the increment
+                           iteration_steps, iteration_flips = 0, 0
                            
                            # Stress drop detection for KMC
                            if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
@@ -460,17 +477,18 @@ class AthermalSimulation:
                            continue
                       else:
                            # Elastic loading wins (uses up remaining time)
+                           d_eps = strain_unit_tensor * (self.strain_rate * remaining_time)
+                           self.eps_macro += d_eps
                            self.time += remaining_time
                            remaining_time = 0
                  else:
                       # Zero temperature or zero rate -> strictly elastic
+                      d_eps = strain_unit_tensor * (self.strain_rate * remaining_time)
+                      self.eps_macro += d_eps
                       self.time += remaining_time
                       remaining_time = 0
                       
-             # Apply full elastic increment
-             eps_inc = np.zeros((3,3))
-             eps_inc[component] = strain_rate
-             self.eps_macro += eps_inc
+             # Step-end stress update (incorporates all strain added in the KMC loop)
              self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
                   self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args)
              

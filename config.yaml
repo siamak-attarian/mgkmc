@@ -71,7 +71,6 @@ dynamics:
   physical_strain_rate: 1.0e7     # Physical strain rate (1/s)
   eps_target: 0.14                # Target global strain
   n_steps: 1400                   # Number of global loading steps
-  kmc_mode: "on_demand"           # "accumulate" or "on_demand"
   nu0: 1.0e13                     # Attempt frequency (Hz)
 
 # Boundary Conditions

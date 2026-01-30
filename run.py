@@ -150,7 +150,6 @@ def main():
         component=driving_comp,
         stress_targets=mixed_targets,
         mixed_tol=float(bc_cfg['mixed_tol']) * 1e6, # Convert MPa to Pa
-        kmc_mode=dyn_cfg['kmc_mode'],
         
         # Checkpoint & Detection
         checkpoint_interval=out_cfg['checkpoint_interval'],
