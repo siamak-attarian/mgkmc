@@ -22,5 +22,13 @@ dependencies = [
     "numba",
 ]
 
+[project.optional-dependencies]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+    "sphinx-autodoc-typehints",
+]
+
+
 [project.urls]
 "Homepage" = "https://github.com/example/mgkmc"
