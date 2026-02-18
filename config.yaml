@@ -85,7 +85,7 @@ boundary_conditions:
 output:
   directory: "simulation_results"
   checkpoint_interval: 100
-  checkpoint_mode: "none"         # "periodic", "current", "last", or "none"
+  checkpoint_mode: none         # "periodic", "current", "last", or "none"
   checkpoint_elastic_only: true  # [NEW] Only save checkpoints on elastic steps
   enable_save_q: false            # [NEW] Explicit toggle for saving Q
   save_q_interval: 1              # [NEW] Interval to save effective barriers (Q) as .npy files
@@ -97,6 +97,9 @@ output:
   enable_global_log: true
   enable_cascade_log: true
   enable_kmc_log: true
+  vtk_interval: 100               # How often to export VTK files
+  vtk_mode: "elastic"             # "none", "elastic", "kmc", "all"
+  track_cascades: false           # [NEW] Save micro-flip history in checkpoints
   enable_config_backup: true
 
 
@@ -108,3 +111,8 @@ detection:
   stress_drop_lookback: 10         # Number of steps to look back for drop calculation
   max_cascade_steps_pct: 0.3      # [NEW] Stop cascade if steps > 30% of voxels
   max_kmc_steps_pct: 0.3          # [NEW] Stop if sequential KMC steps > 30% of voxels
+
+# Checkpoint Resume (Optional)
+# resume:
+#   mode: "none"                   # "resume", "resume_or_initiate", or "none"
+#   checkpoint_path: "simulation_results/checkpoint_000100.h5"

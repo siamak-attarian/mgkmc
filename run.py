@@ -43,6 +43,8 @@ def get_material_field(field_config, shape, seed=None):
 def main():
     parser = argparse.ArgumentParser(description="Run MGKMC Simulation from YAML config")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
+    parser.add_argument("--resume", type=str, help="Path to HDF5 checkpoint to resume from (errors if not found)")
+    parser.add_argument("--resume_or_initiate", type=str, help="Path to checkpoint to resume from (initiates fresh if not found)")
     args = parser.parse_args()
 
     if not os.path.exists(args.config):
@@ -58,6 +60,51 @@ def main():
     seed = cfg.get('seed', 42)
     np.random.seed(seed)
     print(f"Random seed set to {seed}")
+
+    # ========================================
+    # Resume Logic Detection
+    # ========================================
+    resume_path = None
+    should_resume = False
+    
+    # 1. Check CLI
+    if args.resume:
+        resume_path = args.resume
+        if not os.path.exists(resume_path):
+            print(f"Error: Checkpoint file '{resume_path}' not found (requested via --resume).")
+            return
+        should_resume = True
+    elif args.resume_or_initiate:
+        resume_path = args.resume_or_initiate
+        if os.path.exists(resume_path):
+            should_resume = True
+            print(f"Checkpoint found at '{resume_path}'. Resuming...")
+        else:
+            print(f"Checkpoint not found at '{resume_path}'. Starting fresh...")
+            should_resume = False
+    
+    # 2. Check Config if not set via CLI
+    if not args.resume and not args.resume_or_initiate:
+        res_cfg = cfg.get('resume', {})
+        res_mode = res_cfg.get('mode', 'none')
+        res_path = res_cfg.get('checkpoint_path')
+        
+        if res_mode == "resume":
+            if res_path and os.path.exists(res_path):
+                resume_path = res_path
+                should_resume = True
+                print(f"Resuming from config: {resume_path}")
+            else:
+                print(f"Error: Checkpoint '{res_path}' not found (requested in config).")
+                return
+        elif res_mode == "resume_or_initiate":
+            if res_path and os.path.exists(res_path):
+                resume_path = res_path
+                should_resume = True
+                print(f"Resuming from config: {resume_path}")
+            else:
+                print(f"Checkpoint not found in config. Starting fresh...")
+                should_resume = False
 
     # 2. Geometry
     sys_cfg = cfg['system']
@@ -77,11 +124,14 @@ def main():
     out_cfg = cfg['output']
     output_dir = out_cfg['directory']
     
-    if os.path.exists(output_dir):
+    if os.path.exists(output_dir) and not should_resume:
+        print(f"Cleaning output directory: {output_dir}")
         try:
             shutil.rmtree(output_dir)
         except OSError:
             pass
+    elif should_resume:
+        print(f"Preserving existing output directory for resume: {output_dir}")
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -103,29 +153,35 @@ def main():
         jt = 0.0
         print("Softening DISABLED manually.")
 
-    sim = AthermalSimulation(
-        nx, ny, nz,
-        M=int(sys_cfg['M']),
-        gamma0=float(sys_cfg['gamma0']),
-        E_field=E,
-        nu_field=nu,
-        pixel=float(sys_cfg['pixel']),
-        barrier_generator=bar_cfg['type'],
-        barrier_kwargs=bar_cfg['kwargs'],
-        output_dir=output_dir,
-        softening_scheme=phys_cfg['softening_scheme'],
-        softening_cap=float(phys_cfg['softening_cap']),
-        jp=jp,
-        jt=jt,
-        temperature=float(dyn_cfg['temperature']),
-        strain_rate=float(dyn_cfg['physical_strain_rate']),
-        stability_threshold=float(phys_cfg['stability_threshold']),
-        redraw_directions=phys_cfg.get('redraw_directions', True),
-        redraw_barriers=phys_cfg.get('redraw_barriers', True),
-        max_cascade_steps_pct=float(det_cfg.get('max_cascade_steps_pct', 0.3)),
-        nu0=float(dyn_cfg.get('nu0', 1e13)),
-        q_act_temp=float(phys_cfg.get('q_act_temp', 0.37))
-    )
+    if should_resume:
+        print(f"Loading state from {resume_path}...")
+        sim = AthermalSimulation.load_checkpoint(resume_path)
+        # Re-apply some output settings from current config
+        sim.output_dir = output_dir
+    else:
+        sim = AthermalSimulation(
+            nx, ny, nz,
+            M=int(sys_cfg['M']),
+            gamma0=float(sys_cfg['gamma0']),
+            E_field=E,
+            nu_field=nu,
+            pixel=float(sys_cfg['pixel']),
+            barrier_generator=bar_cfg['type'],
+            barrier_kwargs=bar_cfg['kwargs'],
+            output_dir=output_dir,
+            softening_scheme=phys_cfg['softening_scheme'],
+            softening_cap=float(phys_cfg['softening_cap']),
+            jp=jp,
+            jt=jt,
+            temperature=float(dyn_cfg['temperature']),
+            strain_rate=float(dyn_cfg['physical_strain_rate']),
+            stability_threshold=float(phys_cfg['stability_threshold']),
+            redraw_directions=phys_cfg.get('redraw_directions', True),
+            redraw_barriers=phys_cfg.get('redraw_barriers', True),
+            max_cascade_steps_pct=float(det_cfg.get('max_cascade_steps_pct', 0.3)),
+            nu0=float(dyn_cfg.get('nu0', 1e13)),
+            q_act_temp=float(phys_cfg.get('q_act_temp', 0.37))
+        )
 
     # 5. Run Mixed BC Simulation
     bc_cfg = cfg['boundary_conditions']
@@ -170,10 +226,13 @@ def main():
         save_q_interval=out_cfg.get('save_q_interval'),
         save_q_elastic_only=out_cfg.get('save_q_elastic_only', False),
         max_kmc_steps_pct=float(det_cfg.get('max_kmc_steps_pct', 0.3)),
-        enable_summary_log=out_cfg.get('enable_summary_log', True),
         enable_global_log=out_cfg.get('enable_global_log', True),
         enable_cascade_log=out_cfg.get('enable_cascade_log', True),
-        enable_kmc_log=out_cfg.get('enable_kmc_log', True)
+        enable_kmc_log=out_cfg.get('enable_kmc_log', True),
+        vtk_interval=out_cfg.get('vtk_interval'),
+        vtk_mode=out_cfg.get('vtk_mode', 'none'),
+        track_cascades=out_cfg.get('track_cascades', False),
+        append_logs=should_resume
     )
 
     print(f"\nSimulation complete. Results in '{output_dir}'")

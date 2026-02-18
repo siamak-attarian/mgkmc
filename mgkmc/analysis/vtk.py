@@ -316,7 +316,7 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         point_data=point_data,
         cell_data=cell_data
     )
-    mesh.write(filename)
+    meshio.write(filename, mesh)
     #print(f"VTK export complete: {filename}")
 
 
