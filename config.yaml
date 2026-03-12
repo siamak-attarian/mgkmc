@@ -72,6 +72,8 @@ dynamics:
   eps_target: 0.14                # Target global strain
   n_steps: 1400                   # Number of global loading steps
   nu0: 1.0e13                     # Attempt frequency (Hz)
+  instability_mode: "cascade"     # "cascade" (collective) or "kmc" (sequential)
+  cascade_timing: "none"          # "none", "single" (1/nu0), or "per_flip" (N/nu0)
 
 # Boundary Conditions
 boundary_conditions:

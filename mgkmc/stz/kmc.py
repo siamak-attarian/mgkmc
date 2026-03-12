@@ -2,27 +2,13 @@ import numpy as np
 from numba import jit
 
 @jit(nopython=True, cache=True)
-def compute_rates(Q_field, volume, temperature, nu0=1e13):
+def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="cascade"):
     """
     Compute KMC rates for all modes using Numba.
     Returns:
-       rates_flat: 1D array of all valid rates (Q>0)
-       indices_flat: 1D array of encoded indices (x*Ny*Nz*M + ...) or mapped?
-       
-    For rejection-free KMC, we need a cumulative sum.
-    
-    Strategy:
-    1. Calculate rate for every mode.
-    2. Store non-zero rates in a pre-allocated buffer?
-    
-    Or return dense arrays and let Python filter? 
-    Python filtering is slow.
-    
-    Better Strategy:
-    Return `rates` of shape (Nx, Ny, Nz, M).
-    Let caller flatten? Or flatten inside?
-    
-    Flattening inside Numba is fast.
+       rates_flat: 1D array of all valid rates
+       indices_flat: 1D array of encoded indices
+       total_rate: sum of all rates
     """
     nx, ny, nz, M = Q_field.shape
     kB = 8.617e-5
@@ -31,14 +17,20 @@ def compute_rates(Q_field, volume, temperature, nu0=1e13):
     # We'll return everything and let selection handle zeros?
     # No, selection needs compact array.
     
-    # Pass 1: Count valid events (Q > 0)
+    # Pass 1: Count valid events
     count = 0
     for x in range(nx):
         for y in range(ny):
             for z in range(nz):
                 for m in range(M):
-                    if Q_field[x,y,z,m] > 0:
+                    q = Q_field[x,y,z,m]
+                    if instability_mode == "kmc":
+                        # In KMC mode, we pick EVERYTHING (thermal and unstable)
                         count += 1
+                    else:
+                        # Classic mode: only thermal events (Q > 0)
+                        if q > 0:
+                            count += 1
     
     # Pass 2: Fill
     rates = np.empty(count, dtype=np.float64)
@@ -55,8 +47,22 @@ def compute_rates(Q_field, volume, temperature, nu0=1e13):
              for z in range(nz):
                  for m in range(M):
                      q = Q_field[x,y,z,m]
-                     if q > 0:
-                         r = volume * nu0 * np.exp(-q * beta)
+                     
+                     include = False
+                     if instability_mode == "kmc":
+                         include = True
+                     elif q > 0:
+                         include = True
+                     
+                     if include:
+                         if q <= 0:
+                             # Unstable or marginally stable: Rate = nu0
+                             # This caps the rate and avoids overflow
+                             r = volume * nu0
+                         else:
+                             # Thermal event: Standard Arrhenius
+                             r = volume * nu0 * np.exp(-q * beta)
+                         
                          rates[k] = r
                          total_rate += r
                          # Encode index

@@ -180,7 +180,9 @@ def main():
             redraw_barriers=phys_cfg.get('redraw_barriers', True),
             max_cascade_steps_pct=float(det_cfg.get('max_cascade_steps_pct', 0.3)),
             nu0=float(dyn_cfg.get('nu0', 1e13)),
-            q_act_temp=float(phys_cfg.get('q_act_temp', 0.37))
+            q_act_temp=float(phys_cfg.get('q_act_temp', 0.37)),
+            instability_mode=dyn_cfg.get('instability_mode', 'cascade'),
+            cascade_timing=dyn_cfg.get('cascade_timing', 'none')
         )
 
     # 5. Run Mixed BC Simulation
@@ -232,7 +234,10 @@ def main():
         vtk_interval=out_cfg.get('vtk_interval'),
         vtk_mode=out_cfg.get('vtk_mode', 'none'),
         track_cascades=out_cfg.get('track_cascades', False),
-        append_logs=should_resume
+        append_logs=should_resume,
+        eps_target=eps_target,
+        instability_mode=dyn_cfg.get('instability_mode', 'cascade'),
+        cascade_timing=dyn_cfg.get('cascade_timing', 'none')
     )
 
     print(f"\nSimulation complete. Results in '{output_dir}'")

@@ -32,7 +32,9 @@ class AthermalSimulation:
                  redraw_barriers=True,    # Redraw all Q0 in voxel after flip
                  max_cascade_steps_pct=0.3, # Stop cascade if steps > this pct of voxels
                  nu0=1e13,                 # Attempt frequency (Hz)
-                 q_act_temp=0.37           # Activation barrier for JT recovery (eV)
+                 q_act_temp=0.37,          # Activation barrier for JT recovery (eV)
+                 instability_mode="cascade", # "cascade" or "kmc"
+                 cascade_timing="none"       # "none", "single", or "per_flip"
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -60,6 +62,8 @@ class AthermalSimulation:
         self.max_cascade_steps_pct = max_cascade_steps_pct
         self.nu0 = nu0
         self.q_act_temp = q_act_temp
+        self.instability_mode = instability_mode
+        self.cascade_timing = cascade_timing
 
         # Dynamic calculation of tau if not provided
         if self.temperature > 0 and (self.tau is None or self.tau == np.inf):
@@ -246,7 +250,7 @@ class AthermalSimulation:
                         self.prev_strain_dir, self.softening_cap,
                         scheme, self.tau)
 
-    def _run_cascade(self, global_step, vtk_prefix=None, track_cascades=False):
+    def _run_cascade(self, global_step, vtk_prefix=None, track_cascades=False, strain_unit_tensor=None, eps_target=None, component=(0,0), log_callback=None):
         local_step = 0
         total_flips = 0
 
@@ -302,6 +306,15 @@ class AthermalSimulation:
                 self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
             )
             
+            if log_callback:
+                log_callback(n_flipped)
+            
+            # Check for eps_target after logging
+            if eps_target is not None and self.eps_macro[component] >= eps_target:
+                eps_curr = self.eps_field.mean(axis=(0,1,2))
+                sig_curr = self.sig_field.mean(axis=(0,1,2))
+                return local_step + 1, total_flips, eps_curr, sig_curr, False, True
+            
             if vtk_prefix:
                 fname = f"{vtk_prefix}_step{global_step:06d}_cascade{local_step+1:04d}.vtu"
                 self.export_vtk(fname)
@@ -310,11 +323,11 @@ class AthermalSimulation:
             max_cascade_steps = int(self.max_cascade_steps_pct * self.total_voxels)
             if local_step > max_cascade_steps:
                 print(f"Cascade limit reached ({local_step} steps > {self.max_cascade_steps_pct*100:.1f}% of {self.total_voxels} voxels)")
-                return local_step, total_flips, self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2)), True
+                return local_step, total_flips, self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2)), True, False
                  
         eps_curr = self.eps_field.mean(axis=(0,1,2))
         sig_curr = self.sig_field.mean(axis=(0,1,2))
-        return local_step, total_flips, eps_curr, sig_curr, False
+        return local_step, total_flips, eps_curr, sig_curr, False, False
 
     def run_mixed(self, n_global_steps, strain_rate, component=(0,1), 
                   stress_targets={}, mixed_tol=1e-4, mixed_max_iter=50,
@@ -336,7 +349,10 @@ class AthermalSimulation:
                   max_kmc_steps_pct=0.3,
                   ignore_drop_steps=0,
                   stress_drop_lookback=1,
-                  append_logs=False):
+                  append_logs=False,
+                  eps_target=None,
+                  instability_mode="cascade", # "cascade" or "kmc"
+                  cascade_timing="single"): # "single" or "per_flip"
         
         if not stress_targets:
             if component == (0,0):
@@ -353,64 +369,44 @@ class AthermalSimulation:
                         enable_cascade_log=enable_cascade_log,
                         enable_kmc_log=enable_kmc_log,
                         append=append_logs)
+        
+        if enable_console_log:
+            header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}"
+            print(header)
+            print("-" * len(header))
+
         start_time_total = time.time()
         
-        dt_elastic_increment = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
-        
-        if vtk_mode != "none":
-            self.export_vtk(os.path.join(self.output_dir, "vtk_step_000000.vtu"))
-
-        _, _, eps_curr, sig_curr, truncated = self._run_cascade(global_step=0, track_cascades=track_cascades)
-        if truncated: return
-        
-        if enable_save_q and save_q_interval is not None:
-            np.save(os.path.join(self.output_dir, "Q_step_000000.npy"), self.Q)
-
-        strain_unit_tensor = np.zeros((3,3))
-        strain_unit_tensor[component] = 1.0
-
-        elastic_chk_id = 0
-        if checkpoint_interval is not None and checkpoint_mode in ["periodic", "current"]:
-            cp_name = f"{checkpoint_path}.h5" if checkpoint_mode == "current" else \
-                      (f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5" if checkpoint_elastic_only else f"{checkpoint_path}_000000.h5")
-            if checkpoint_elastic_only: elastic_chk_id += 1
-            self.save_checkpoint(cp_name, step=0)
-        
-        stress_history = [sig_curr[stress_drop_component]]
-        stop_drop_triggered = False
-        stop_countdown = stop_post_drop_steps
-        step = 1
         elastic_steps_done = 0
         total_kmc_steps = 0
+        cascade_event_count = 0  # Cumulative cascade events
+        step = 1
+        stop_drop_triggered = False
+        stop_countdown = stop_post_drop_steps
+        elastic_chk_id = 0
         E_avg, nu_avg = np.mean(self.E), np.mean(self.nu)
         
-        def get_correction_legacy(sigma_err):
-            tr_sig = np.trace(sigma_err)
-            return (sigma_err - nu_avg * tr_sig * np.eye(3)) / E_avg
-        
-        last_step_type = "elastic"
-        kmc_baseline_stress = None
-        sequential_kmc_steps = 0
-        max_sequential_kmc = int(max_kmc_steps_pct * self.total_voxels)
-
-        def _do_logging(current_step, step_type, cascade_steps, cascade_flips):
+        def _do_logging(current_step, step_type, cascade_id, cascade_flips):
+            """
+            Unified logging.
+            cascade_id: In 'cascade' mode, this is the cumulative event counter.
+                       In 'kmc' mode, this is 0.
+            cascade_flips: Number of flips in this specific entry.
+            """
             eps_curr, sig_curr = self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2))
-            self.log_global(current_step, elastic_steps_done, total_kmc_steps, self.time, eps_curr, sig_curr, cascade_steps, cascade_flips)
+            # Global log uses original total_flips logic (sum of flips)
+            self.log_global(current_step, elastic_steps_done, total_kmc_steps, self.time, eps_curr, sig_curr, cascade_id, cascade_flips)
             self.history_global.append((eps_curr[0,0], sig_curr[0,0]/1e9))
             
             curr_stress_val, curr_strain_val = sig_curr[stress_drop_component], eps_curr[stress_drop_component]
             now, elapsed = datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time_total
             
-            status_msg = f"[{now}] [{elapsed:7.1f}s | {self.time:8.2e}s] Step {current_step:4d}: Type={step_type.upper():<8}, KMC={total_kmc_steps:4d}, Cascade={cascade_steps:d}, Eps_xx={curr_strain_val:8.6f}, Sig={curr_stress_val/1e9:6.3f} GPa"
-            if stop_drop_triggered:
-                status_msg += " [SB DETECTED]"
-            
-            summary_line = f"{now:<20} {elapsed:<12.2f} {current_step:<8d} {step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {cascade_steps:<8d} {cascade_flips:<8d} {self.time:<15.6e}\n"
+            summary_line = f"{now:<20} {elapsed:<12.2f} {current_step:<8d} {step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {cascade_id:<8d} {cascade_flips:<8d} {self.time:<15.6e}\n"
             
             if self._f_summary:
                 self._f_summary.write(summary_line)
             if enable_console_log:
-                print(status_msg)
+                print(summary_line.strip())
             
             if vtk_interval and current_step % vtk_interval == 0:
                 if vtk_mode == "all" or (vtk_mode == "kmc" and step_type == "kmc") or (vtk_mode == "elastic" and step_type == "elastic"):
@@ -419,41 +415,124 @@ class AthermalSimulation:
 
             return curr_stress_val
 
+        def get_correction_legacy(sigma_err):
+            tr_sig = np.trace(sigma_err)
+            return (sigma_err - nu_avg * tr_sig * np.eye(3)) / E_avg
+
+        if vtk_mode != "none":
+            self.export_vtk(os.path.join(self.output_dir, "vtk_step_000000.vtu"))
+
+        strain_unit_tensor = np.zeros((3,3))
+        strain_unit_tensor[component] = 1.0
+
+        def _cascade_log_callback(cascade_step_flips):
+            # This is for internal cascade steps inside _run_cascade (if track_cascades is True)
+            # We don't usually log every sub-step to summary_log to avoid bloat.
+            pass
+
+        # Initial relaxation (step 0)
+        if self.instability_mode == "cascade":
+            l, f, eps_curr, sig_curr, truncated, stopped_by_eps = self._run_cascade(
+                global_step=0, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
+                eps_target=eps_target, component=component, log_callback=_cascade_log_callback
+            )
+            if f > 0:
+                cascade_event_count += 1
+                # Advance time based on cascade_timing
+                dt_cascade = 0.0
+                if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
+                elif self.cascade_timing == "per_flip": dt_cascade = f / self.nu0
+                
+                if dt_cascade > 0:
+                    self.time += dt_cascade
+                    # If we advance time, we must advance strain (macroscopic load)
+                    self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+                    # Recalculate stress/barriers after time advance
+                    self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                        self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                    )
+                _do_logging(0, "cascade", cascade_event_count, f)
+            
+            if truncated or stopped_by_eps: 
+                self._close_logs()
+                return
+        else:
+            # KMC mode relaxation happens inside the main loop loop
+            # BUT we should check if there's an instability at step 0
+            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+            )
+            sig_curr = self.sig_field.mean(axis=(0,1,2))
+        
+        stress_history = [sig_curr[stress_drop_component]]
+        
+        if checkpoint_interval is not None and checkpoint_mode in ["periodic", "current"]:
+            cp_name = f"{checkpoint_path}.h5" if checkpoint_mode == "current" else \
+                      (f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5" if checkpoint_elastic_only else f"{checkpoint_path}_000000.h5")
+            if checkpoint_elastic_only: elastic_chk_id += 1
+            self.save_checkpoint(cp_name, step=0)
+
+        dt_elastic_increment = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
+        max_sequential_kmc = int(max_kmc_steps_pct * self.total_voxels)
+        kmc_baseline_stress = None
+        sequential_kmc_steps = 0
+        remaining_time = 0.0
+
         while elastic_steps_done < n_global_steps:
-            iteration_steps, iteration_flips = 0, 0
-            remaining_time = dt_elastic_increment 
+            remaining_time += dt_elastic_increment 
             
             while remaining_time > 0:
                 self.update_barriers()
-                unstable_indices = find_unstable(self.Q, self.stability_threshold)
-                if len(unstable_indices) > 0:
-                    v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (vtk_mode == "all" and track_cascades) else None
-                    l, f, _, _, truncated = self._run_cascade(step, vtk_prefix=v_pfx, track_cascades=track_cascades)
-                    iteration_steps += l
-                    iteration_flips += f
-                    if truncated: return
-                    continue
                 
-                rates_flat, indices_flat, total_rate = compute_rates(self.Q, self.volume, self.temperature, self.nu0)
+                # BRANCH: CASCADE vs KMC unstable handling
+                if self.instability_mode == "cascade":
+                    unstable_indices = find_unstable(self.Q, self.stability_threshold)
+                    if len(unstable_indices) > 0:
+                        v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (vtk_mode == "all" and track_cascades) else None
+                        l, f, _, _, truncated, stopped_by_eps = self._run_cascade(
+                            step, vtk_prefix=v_pfx, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
+                            eps_target=eps_target, component=component, log_callback=_cascade_log_callback
+                        )
+                        if f > 0:
+                            cascade_event_count += 1
+                            dt_cascade = 0.0
+                            if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
+                            elif self.cascade_timing == "per_flip": dt_cascade = f / self.nu0
+                            
+                            if dt_cascade > 0:
+                                self.time += dt_cascade
+                                self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+                                self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                                    self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                                )
+                            _do_logging(step, "cascade", cascade_event_count, f)
+
+                        if truncated or stopped_by_eps: 
+                            self._close_logs()
+                            return
+                        continue
+
+                # SHARED: Rate calculation
+                # In 'kmc' mode, compute_rates will include Q <= 0
+                rates_flat, indices_flat, total_rate = compute_rates(self.Q, self.volume, self.temperature, self.nu0, instability_mode=self.instability_mode)
                 
-                if self.temperature > 0 and total_rate > 0:
+                if total_rate > 0:
                     u = np.random.uniform()
                     t_wait = -np.log(u) / total_rate
                     
                     if t_wait < remaining_time:
-                        d_eps = strain_unit_tensor * (self.strain_rate * t_wait)
-                        self.eps_macro += d_eps
+                        self.time += t_wait
+                        self.eps_macro += strain_unit_tensor * (self.strain_rate * t_wait)
+                        remaining_time -= t_wait
 
                         idx_flat = select_event(rates_flat, total_rate) 
-                        if idx_flat == -1:
-                            self.time += remaining_time
-                            remaining_time = 0
-                            continue
+                        if idx_flat == -1: continue
                         
                         x, y, z, m = decode_index(indices_flat[idx_flat], self.grid_shape[1], self.grid_shape[2], self.M)
-                        barrier_val = self.Q[x,y,z,m]
+                        is_instab = self.Q[x,y,z,m] <= self.stability_threshold
+                        
                         apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
-                                       self.catalog, x, y, z, m, self.time + t_wait, self.jp, self.jt, self.softening_cap)
+                                       self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap)
                         self.prev_strain_dir[x,y,z] = self.catalog[x,y,z,m]
                         
                         if self.redraw_directions or self.redraw_barriers:
@@ -463,42 +542,24 @@ class AthermalSimulation:
                             self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
                             self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
                         
-                        if track_cascades:
-                            self.flip_event_history.append((int(step), -1, int(x), int(y), int(z), int(m)))
-
-                        self.log_kmc(step, total_kmc_steps, remaining_time, t_wait, (x,y,z,m), barrier_val)
-                        self.time += t_wait
-                        remaining_time -= t_wait
+                        self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                            self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                        )
+                        
+                        log_type = "kmc_instab" if is_instab else "kmc"
+                        # In KMC mode, cascade counter is 0 as per request
+                        curr_stress_val = _do_logging(step, log_type, 0 if self.instability_mode == "kmc" else cascade_event_count, 1)
                         total_kmc_steps += 1
-                        last_step_type = "kmc"
                         
-                        v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (vtk_mode == "all" and track_cascades) else None
-                        l_kmc, f_kmc, _, _, truncated = self._run_cascade(step, vtk_prefix=v_pfx, track_cascades=track_cascades)
-                        if truncated: return
-                        
-                        if f_kmc == 0:
-                            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                            )
-                        
-                        curr_stress_val = _do_logging(step, "kmc", iteration_steps + l_kmc, iteration_flips + f_kmc + 1)
-                        iteration_steps, iteration_flips = 0, 0
-                        
-                        if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
-                            if kmc_baseline_stress is None:
-                                kmc_baseline_stress = curr_stress_val 
-                            drop_frac = (abs(kmc_baseline_stress) - abs(curr_stress_val)) / abs(kmc_baseline_stress) if abs(kmc_baseline_stress) > 1e-6 else 0.0
-                            if drop_frac > stop_on_stress_drop:
-                                print(f"\n[ALERT] KMC Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
-                                stop_drop_triggered = True
-                        
-                        stress_history.append(curr_stress_val)
-                        sequential_kmc_steps += 1
-                        step += 1 
+                        if is_instab: sequential_kmc_steps += 1
+                        else: sequential_kmc_steps = 0
                         
                         if sequential_kmc_steps > max_sequential_kmc:
-                            print(f"\n[TERMINATE] KMC sequence limit reached! {sequential_kmc_steps} consecutive steps.")
+                            print(f"\n[TERMINATE] KMC instability sequence limit reached! {sequential_kmc_steps} steps.")
                             return
+                        
+                        stress_history.append(curr_stress_val)
+                        step += 1
                         continue
                     else:
                         d_eps = strain_unit_tensor * (self.strain_rate * remaining_time)
@@ -511,22 +572,43 @@ class AthermalSimulation:
                     self.time += remaining_time
                     remaining_time = 0
                     
+            # End of remaining_time inner loop (Elastic increment update)
             self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
                 self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
             )
             
+            # Elastic relaxation loop (Mixed BCs)
             converged = False
             for it in range(mixed_max_iter):
-                v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (vtk_mode == "all" and track_cascades) else None
-                l, f, _, sig_M, truncated = self._run_cascade(step, vtk_prefix=v_pfx, track_cascades=track_cascades)
-                iteration_steps += l
-                iteration_flips += f
-                if truncated: return
+                if self.instability_mode == "cascade":
+                    v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (vtk_mode == "all" and track_cascades) else None
+                    l, f, _, sig_M, truncated, stopped_by_eps = self._run_cascade(
+                        step, vtk_prefix=v_pfx, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
+                        eps_target=eps_target, component=component, log_callback=_cascade_log_callback
+                    )
+                    if f > 0:
+                        cascade_event_count += 1
+                        dt_cascade = 0.0
+                        if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
+                        elif self.cascade_timing == "per_flip": dt_cascade = f / self.nu0
+                        if dt_cascade > 0:
+                            self.time += dt_cascade
+                            self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+                            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                            )
+                        _do_logging(step, "cascade", cascade_event_count, f)
+                    if truncated or stopped_by_eps: 
+                        self._close_logs()
+                        return
+                    sig_curr = sig_M
+                else:
+                    sig_curr = self.sig_field.mean(axis=(0,1,2))
                 
                 stress_err_tensor = np.zeros((3,3))
                 max_err = 0.0
                 for idx_t, target_val in stress_targets.items():
-                    err = target_val - sig_M[idx_t]
+                    err = target_val - sig_curr[idx_t]
                     stress_err_tensor[idx_t] = err
                     max_err = max(max_err, abs(err))
                 
@@ -545,11 +627,8 @@ class AthermalSimulation:
                 print(f"Warning: Mixed loop did not converge at step {step} (Err={max_err:.2e})")
 
             elastic_steps_done += 1
-            last_step_type = "elastic"
-            kmc_baseline_stress = None
-            sequential_kmc_steps = 0
-             
-            curr_stress_val = _do_logging(step, "elastic", iteration_steps, iteration_flips)
+            curr_stress_val = _do_logging(step, "elastic", 0 if self.instability_mode == "kmc" else cascade_event_count, 0)
+            stress_history.append(curr_stress_val)
              
             if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
                 lookback = max(1, stress_drop_lookback)
@@ -557,13 +636,10 @@ class AthermalSimulation:
                     ref_stress = stress_history[-lookback]
                     drop_frac = (abs(ref_stress) - abs(curr_stress_val)) / abs(ref_stress) if abs(ref_stress) > 1e-6 else 0.0
                     if drop_frac > stop_on_stress_drop:
-                        print(f"\n[ALERT] Elastic Stress Drop Detected! {drop_frac*100:.1f}% > {stop_on_stress_drop*100:.1f}% at step {step}")
+                        print(f"\n[ALERT] Stress Drop Detected! {drop_frac*100:.1f}% at step {step}")
                         stop_drop_triggered = True
-            stress_history.append(curr_stress_val)
              
-            should_save = checkpoint_interval and step % checkpoint_interval == 0 and checkpoint_mode in ["periodic", "current"]
-            if should_save and checkpoint_elastic_only and last_step_type != "elastic": should_save = False
-            if should_save:
+            if checkpoint_interval and step % checkpoint_interval == 0 and checkpoint_mode in ["periodic", "current"]:
                 cp_name = f"{checkpoint_path}.h5" if checkpoint_mode == "current" else \
                           (f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5" if checkpoint_elastic_only else f"{checkpoint_path}_{step:06d}.h5")
                 if checkpoint_elastic_only: elastic_chk_id += 1
@@ -571,13 +647,14 @@ class AthermalSimulation:
     
             if enable_save_q and save_q_interval and step % save_q_interval == 0:
                 should_save_q = True
-                if save_q_elastic_only and last_step_type != "elastic":
+                if save_q_elastic_only and self.instability_mode != "elastic": # Changed from last_step_type to self.instability_mode
                     should_save_q = False
                 if should_save_q:
                     np.save(os.path.join(self.output_dir, f"Q_step_{step:06d}.npy"), self.Q)
+
             if stop_drop_triggered:
                 if stop_countdown > 0: stop_countdown -= 1
-                else: print(f"Stopping criteria: {stop_post_drop_steps} steps after detection."); break
+                else: break
             step += 1
 
         if checkpoint_mode == "last": self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
