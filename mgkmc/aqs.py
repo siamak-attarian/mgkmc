@@ -268,6 +268,7 @@ class AthermalSimulation:
             q_values = self.Q[unstable_indices[:,0], unstable_indices[:,1], unstable_indices[:,2], unstable_indices[:,3]]
             sort_idx = np.argsort(q_values)
             unstable_indices = unstable_indices[sort_idx]
+            n_unstable = len(unstable_indices)
 
             flipped_indices = []
             flipped_voxels_in_batch = set()
@@ -302,12 +303,22 @@ class AthermalSimulation:
             self.log_cascade(global_step, local_step, flipped_indices, 0.0, n_unstable=n_flipped)
             total_flips += n_flipped
             
+            # Cascade Timing: Advance time and strain PER ITERATION
+            dt_cascade = 0.0
+            if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
+            elif self.cascade_timing == "per_flip": dt_cascade = n_flipped / self.nu0
+            
+            if dt_cascade > 0:
+                self.time += dt_cascade
+                if strain_unit_tensor is not None:
+                    self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+
             self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
                 self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
             )
             
             if log_callback:
-                log_callback(n_flipped)
+                log_callback(local_step, n_flipped)
             
             # Check for eps_target after logging
             if eps_target is not None and self.eps_macro[component] >= eps_target:
@@ -425,10 +436,10 @@ class AthermalSimulation:
         strain_unit_tensor = np.zeros((3,3))
         strain_unit_tensor[component] = 1.0
 
-        def _cascade_log_callback(cascade_step_flips):
+        def _cascade_log_callback(local_step, cascade_step_flips):
             # This is for internal cascade steps inside _run_cascade (if track_cascades is True)
-            # We don't usually log every sub-step to summary_log to avoid bloat.
-            pass
+            # Log each internal iteration to summary_log for better transparency
+            _do_logging(step, "cascade", cascade_event_count, cascade_step_flips)
 
         # Initial relaxation (step 0)
         if self.instability_mode == "cascade":
@@ -438,20 +449,9 @@ class AthermalSimulation:
             )
             if f > 0:
                 cascade_event_count += 1
-                # Advance time based on cascade_timing
-                dt_cascade = 0.0
-                if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
-                elif self.cascade_timing == "per_flip": dt_cascade = f / self.nu0
-                
-                if dt_cascade > 0:
-                    self.time += dt_cascade
-                    # If we advance time, we must advance strain (macroscopic load)
-                    self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
-                    # Recalculate stress/barriers after time advance
-                    self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                        self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                    )
-                _do_logging(0, "cascade", cascade_event_count, f)
+                # Timing handled internally in _run_cascade loop
+                pass
+                # _do_logging(0, "cascade", cascade_event_count, f)  # Now handled iteration-by-iteration in _cascade_log_callback
             
             if truncated or stopped_by_eps: 
                 self._close_logs()
@@ -495,17 +495,9 @@ class AthermalSimulation:
                         )
                         if f > 0:
                             cascade_event_count += 1
-                            dt_cascade = 0.0
-                            if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
-                            elif self.cascade_timing == "per_flip": dt_cascade = f / self.nu0
-                            
-                            if dt_cascade > 0:
-                                self.time += dt_cascade
-                                self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
-                                self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                                    self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                                )
-                            _do_logging(step, "cascade", cascade_event_count, f)
+                            # Timing handled internally in _run_cascade loop
+                            pass
+                            # _do_logging(step, "cascade", cascade_event_count, f)  # Now handled iteration-by-iteration in _cascade_log_callback
 
                         if truncated or stopped_by_eps: 
                             self._close_logs()
@@ -588,16 +580,9 @@ class AthermalSimulation:
                     )
                     if f > 0:
                         cascade_event_count += 1
-                        dt_cascade = 0.0
-                        if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
-                        elif self.cascade_timing == "per_flip": dt_cascade = f / self.nu0
-                        if dt_cascade > 0:
-                            self.time += dt_cascade
-                            self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
-                            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                            )
-                        _do_logging(step, "cascade", cascade_event_count, f)
+                        # Timing handled internally in _run_cascade loop
+                        pass
+                        # _do_logging(step, "cascade", cascade_event_count, f)  # Now handled iteration-by-iteration in _cascade_log_callback
                     if truncated or stopped_by_eps: 
                         self._close_logs()
                         return
