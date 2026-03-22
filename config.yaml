@@ -65,6 +65,29 @@ barriers:
     std: 0.4      # eV
     min_cutoff: 0.0
 
+  # Example for rayleigh:
+  # type: "rayleigh"
+  # kwargs:
+  #   loc: 0.0
+  #   scale: 0.5
+  #   min_cutoff: 0.0
+
+  # Example for modified_rayleigh:
+  # type: "modified_rayleigh"
+  # kwargs:
+  #   mean: 2.0
+  #   std: 0.6
+  #   min_cutoff: 0.0
+
+  # Example for modified_rayleigh_with_exponential:
+  # type: "modified_rayleigh_with_exponential"
+  # kwargs:
+  #   ratio: 0.8
+  #   mean: 2.0
+  #   std: 0.6
+  #   epsilon: 0.1
+  #   min_cutoff: 0.0
+
 # Simulation Dynamics
 dynamics:
   temperature: 300.0              # Temperature (K)
