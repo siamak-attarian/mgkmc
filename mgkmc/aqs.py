@@ -22,6 +22,7 @@ class AthermalSimulation:
                  softening_scheme="isotropic", # "isotropic" or "directional"
                  softening_cap=2.0,
                  jp=10.0, jt=30.0,
+                 neighbor_softening_fraction=0.0,
                  tau=np.inf, # Transient decay time (Set to inf for no decay)
                  output_dir="output",
                  temperature=0.0, # Kelvin
@@ -52,6 +53,7 @@ class AthermalSimulation:
         self.softening_cap = softening_cap
         self.jp = jp
         self.jt = jt
+        self.neighbor_softening_fraction = neighbor_softening_fraction
         self.tau = tau
         self.temperature = temperature
         self.strain_rate = strain_rate
@@ -283,7 +285,7 @@ class AthermalSimulation:
                 
                 apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
                                self.catalog, ux, uy, uz, um, self.time, 
-                               self.jp, self.jt, self.softening_cap)
+                               self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                 
                 self.prev_strain_dir[ux,uy,uz] = self.catalog[ux,uy,uz,um]
                 
@@ -524,7 +526,7 @@ class AthermalSimulation:
                         is_instab = self.Q[x,y,z,m] <= self.stability_threshold
                         
                         apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
-                                       self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap)
+                                       self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                         self.prev_strain_dir[x,y,z] = self.catalog[x,y,z,m]
                         
                         if self.redraw_directions or self.redraw_barriers:
@@ -679,6 +681,7 @@ class AthermalSimulation:
                     meta.attrs['stability_threshold'] = self.stability_threshold
                     meta.attrs['jp'] = self.jp
                     meta.attrs['jt'] = self.jt
+                    meta.attrs['neighbor_softening_fraction'] = self.neighbor_softening_fraction
                     meta.attrs['softening_cap'] = self.softening_cap
                     meta.attrs['softening_scheme'] = self.softening_scheme
                     fields = f.create_group('fields')
@@ -723,6 +726,7 @@ class AthermalSimulation:
             sim = cls(nx, ny, nz, M=M, gamma0=gamma0, E_field=E_field, nu_field=nu_field, 
                       pixel=pixel, temperature=meta.attrs['temperature'], 
                       strain_rate=meta.attrs['strain_rate'], jp=meta.attrs['jp'], jt=meta.attrs['jt'],
+                      neighbor_softening_fraction=meta.attrs.get('neighbor_softening_fraction', 0.0),
                       softening_cap=meta.attrs['softening_cap'], softening_scheme=meta.attrs['softening_scheme'],
                       nu0=meta.attrs.get('nu0', 1e13), q_act_temp=meta.attrs.get('q_act_temp', 0.37))
             

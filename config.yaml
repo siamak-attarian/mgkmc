@@ -51,6 +51,7 @@ physics:
   softening_scheme: "directional" # "isotropic" or "directional"
   jp: 20                          # Plastic-to-Softening coupling
   jt: 20                          # Thermal-to-Softening coupling
+  neighbor_softening_fraction: 0.0 # [NEW] Fraction of softening applied to the 26 immediate neighbors
   q_act_temp: 0.37                # [NEW] Activation barrier for JT recovery (eV)
   softening_cap: 0.916            # Max softening (e.g., -log(0.4) ~ 0.916)
   stability_threshold: 0.0        # Threshold for athermal instability check

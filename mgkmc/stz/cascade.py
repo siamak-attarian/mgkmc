@@ -43,10 +43,14 @@ def find_unstable(Q_field, threshold=0.0):
 @jit(nopython=True, cache=True)
 def apply_flip_soa(eps_plastic_field, key_field, soft_prop_field, last_event_time_field, 
                    catalog, x, y, z, m, 
-                   current_time, jp, jt, g_max):
+                   current_time, jp, jt, g_max, jn_frac):
     """
     Apply flip to SoA arrays.
     """
+    nx = eps_plastic_field.shape[0]
+    ny = eps_plastic_field.shape[1]
+    nz = eps_plastic_field.shape[2]
+
     # 1. Update Plastic Strain
     # eps += gamma
     for i in range(3):
@@ -76,5 +80,28 @@ def apply_flip_soa(eps_plastic_field, key_field, soft_prop_field, last_event_tim
     
     # 3. Update Timestamp
     last_event_time_field[x,y,z] = current_time
+
+    # 4. Neighbor Softening
+    if jn_frac > 0.0:
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    
+                    nx_n = (x + dx + nx) % nx
+                    ny_n = (y + dy + ny) % ny
+                    nz_n = (z + dz + nz) % nz
+                    
+                    # Permanent Softening
+                    gp_n = soft_prop_field[nx_n, ny_n, nz_n, 0]
+                    gp_n_new = gp_n + jn_frac * jp * sum_sq
+                    if g_max > 0 and gp_n_new > g_max:
+                        gp_n_new = g_max
+                    soft_prop_field[nx_n, ny_n, nz_n, 0] = gp_n_new
+                    
+                    # Transient Softening (Additive for neighbors)
+                    gt_n = soft_prop_field[nx_n, ny_n, nz_n, 1]
+                    soft_prop_field[nx_n, ny_n, nz_n, 1] = gt_n + jn_frac * jt * sum_sq
 
 

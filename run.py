@@ -173,6 +173,7 @@ def main():
             softening_cap=float(phys_cfg['softening_cap']),
             jp=jp,
             jt=jt,
+            neighbor_softening_fraction=float(phys_cfg.get('neighbor_softening_fraction', 0.0)),
             temperature=float(dyn_cfg['temperature']),
             strain_rate=float(dyn_cfg['physical_strain_rate']),
             stability_threshold=float(phys_cfg['stability_threshold']),
