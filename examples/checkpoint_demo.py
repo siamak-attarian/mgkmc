@@ -11,7 +11,7 @@ This script shows how to:
 import numpy as np
 import os
 import shutil
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.elasticity import get_uniaxial_stress_x
 
 def main():
@@ -47,7 +47,7 @@ def main():
     print("Part 1: Running simulation for 50 steps...")
     print()
     
-    sim1 = AthermalSimulation(
+    sim1 = ThermalSimulation(
         nx, ny, nz,
         M=M,
         gamma0=gamma0,
@@ -91,7 +91,7 @@ def main():
     print()
     
     # Load checkpoint
-    sim2 = AthermalSimulation.load_checkpoint(CHECKPOINT_FILE)
+    sim2 = ThermalSimulation.load_checkpoint(CHECKPOINT_FILE)
     
     print(f"Checkpoint loaded from step {sim2.current_step}")
     print(f"Loaded stress (xx): {sim2.history_global[-1][1]:.2f} GPa")

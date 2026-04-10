@@ -3,7 +3,7 @@ import os
 import shutil
 import mgkmc
 print(f"DEBUG: mgkmc location: {mgkmc.__file__}")
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.elasticity import get_uniaxial_stress_x
 
 def test_features():
@@ -25,7 +25,7 @@ def test_features():
     # Let's set a very low threshold like 0.001% just to test the logic triggers, 
     # OR rely on a real avalanche. With 16x16, avalanches happen.
     
-    sim = AthermalSimulation(nx, ny, nz, M, 0.1, E, nu, output_dir=output_dir, 
+    sim = ThermalSimulation(nx, ny, nz, M, 0.1, E, nu, output_dir=output_dir, 
                              softening_enabled=True, softening_params={"jp":5, "jt":10})
     
     # We'll set a strict drop of 1% (0.01) which should happen in a plastics cascade
@@ -54,7 +54,7 @@ def test_features():
     if len(checkpoints) > 0:
         # Load one
         cp_path = os.path.join(output_dir, checkpoints[-1])
-        sim_loaded = AthermalSimulation.load_checkpoint(cp_path)
+        sim_loaded = ThermalSimulation.load_checkpoint(cp_path)
         print(f"Loaded checkpoint from step {sim_loaded.current_step}")
         
         # Verify Flip History

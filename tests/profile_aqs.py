@@ -1,6 +1,6 @@
 import numpy as np
 import time
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.elasticity import get_uniaxial_stress_x
 
 def main():
@@ -40,7 +40,7 @@ def main():
     print("\nInitializing simulation...")
     init_start = time.perf_counter()
     
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz,
         M=M, 
         gamma0=gamma0,

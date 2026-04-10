@@ -1,7 +1,7 @@
 import numpy as np
 import os
 import shutil
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 
 def main():
     print("=" * 60)
@@ -56,7 +56,7 @@ def main():
     if os.path.exists(OUTPUT_DIR):
         shutil.rmtree(OUTPUT_DIR)
         
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz,
         M=M, 
         gamma0=gamma0,

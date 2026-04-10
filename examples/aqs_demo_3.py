@@ -6,7 +6,7 @@ import numpy as np
 import os
 import shutil
 import matplotlib.pyplot as plt
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.elasticity import get_uniaxial_stress_x
 
 def main():
@@ -56,7 +56,7 @@ def main():
     # 2. Run Pure Strain Control (Baseline)
     # ----------------------------------------------------
     print("\n[1/2] Running Pure Strain Control...")
-    sim_pure = AthermalSimulation(
+    sim_pure = ThermalSimulation(
         nx, ny, nz, M, gamma0, E, nu, pixel,
         output_dir=OUTPUT_DIR_PURE,
         softening_enabled=True,
@@ -95,7 +95,7 @@ def main():
     E = np.full((nx, ny, nz), 70.0)  # 70 GPa
     nu = np.full((nx, ny, nz), 0.3)
     
-    sim_mixed = AthermalSimulation(
+    sim_mixed = ThermalSimulation(
         nx, ny, nz, M, gamma0, E, nu, pixel,
         output_dir=OUTPUT_DIR_MIXED,
         softening_enabled=True,

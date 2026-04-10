@@ -48,6 +48,10 @@ def compute_barrier(Q_field, Q0_field, sigma_field, catalog, volume,
                 g_p = soft_prop[x,y,z,0]
                 g_base = g_p + g_t_curr
                 
+                # Apply the maximum softening boundary (eta_max) to the total softening
+                if softening_cap > 0 and g_base > softening_cap:
+                    g_base = softening_cap
+                    
                 # 2. Iterate Modes
                 # Using explicit loops for Numba speed on small arrays
                 for m in range(M):

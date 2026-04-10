@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from mgkmc.aqs import AthermalSimulation
+from mgkmc.aqs import ThermalSimulation
 from mgkmc.stz.catalog import stz_catalog_glass
 
 def run_simulation(T, output_dir):
@@ -23,7 +23,7 @@ def run_simulation(T, output_dir):
     # If strain_rate = 1.0, dt_elastic = 1.0. KMC happens VERY frequently.
     rate = 1.0 
     
-    sim = AthermalSimulation(nx, ny, nz, M, gamma0, E, nu, 
+    sim = ThermalSimulation(nx, ny, nz, M, gamma0, E, nu, 
                              output_dir=output_dir,
                              temperature=T,
                              strain_rate=rate,

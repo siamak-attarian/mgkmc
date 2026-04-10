@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import shutil
 import re
 
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 
 def analyze_results():
     print("==================================================")
@@ -58,7 +58,7 @@ def analyze_results():
         step = get_step_from_name(cp_file)
         # print(f"Processing Step {step}...", end='\r')
         
-        sim = AthermalSimulation.load_checkpoint(cp_file)
+        sim = ThermalSimulation.load_checkpoint(cp_file)
         
         # A. Global Stress-Strain
         # Recalculate mean from fields to be sure

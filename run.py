@@ -7,8 +7,8 @@ import pyfftw
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from mgkmc import AthermalSimulation, generate_correlated_field
-
+from mgkmc import ThermalSimulation, generate_correlated_field
+from mgkmc.solver import run_mixed_simulation
 def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
@@ -125,11 +125,28 @@ def main():
     output_dir = out_cfg['directory']
     
     if os.path.exists(output_dir) and not should_resume:
-        print(f"Cleaning output directory: {output_dir}")
-        try:
-            shutil.rmtree(output_dir)
-        except OSError:
-            pass
+        abs_out = os.path.abspath(output_dir)
+        abs_cwd = os.path.abspath(os.getcwd())
+        
+        if abs_out == abs_cwd:
+            print(f"Output directory is the current directory ('.'). Proceeding without deletion or renaming.")
+        else:
+            action = out_cfg.get('duplicate_directory_action', 'delete')
+            if action == 'rename':
+                base_dir = output_dir
+                new_dir = f"{base_dir}_old"
+                counter = 1
+                while os.path.exists(new_dir):
+                    new_dir = f"{base_dir}_old_{counter}"
+                    counter += 1
+                os.rename(output_dir, new_dir)
+                print(f"Directory '{output_dir}' already exists. Renamed to '{new_dir}' to preserve old data.")
+            else:
+                print(f"Cleaning output directory: {output_dir}")
+                try:
+                    shutil.rmtree(output_dir)
+                except OSError:
+                    pass
     elif should_resume:
         print(f"Preserving existing output directory for resume: {output_dir}")
     
@@ -153,13 +170,84 @@ def main():
         jt = 0.0
         print("Softening DISABLED manually.")
 
+    simulation_type = cfg.get('simulation_type', 'kmc')
+
+    if simulation_type == "linear_elastic":
+        print("\n" + "=" * 60)
+        print("Initializing LINEAR ELASTIC simulation...")
+        print("=" * 60)
+        
+        bc_cfg = cfg['boundary_conditions']
+        mixed_targets = {}
+        for k, v in bc_cfg.get('mixed_targets', {}).items():
+            key = tuple(eval(k)) if isinstance(k, str) else tuple(k)
+            mixed_targets[key] = float(v)
+            
+        driving_comp = tuple(bc_cfg['driving_component'])
+        eps_target = float(dyn_cfg['eps_target'])
+        n_steps = int(dyn_cfg['n_steps'])
+        
+        target_strain_mask = np.zeros((3, 3), dtype=bool)
+        target_strain_mask[driving_comp] = True
+        
+        target_values = np.zeros((3, 3))
+        target_values[driving_comp] = eps_target
+        for k, v in mixed_targets.items():
+            # Convert stress targets from GPa to Pa
+            target_values[k] = v * 1e9
+            
+        # Ensure E is in Pa (config usually defines GPa)
+        E_eff = E * 1e9 if np.mean(E) < 1e3 else E
+        
+        # The solver inherently enforces the mask on strain and the targets on stress
+        eps_macro, sig_macro, eps_fields, sig_fields = run_mixed_simulation(
+            E=E_eff, 
+            nu=nu,
+            target_strain_mask=target_strain_mask,
+            target_values=target_values,
+            n_steps=n_steps,
+            pixel=float(sys_cfg['pixel']),
+            tol_macro=float(bc_cfg['mixed_tol']) * 1e6, # MPa to Pa
+            store=False # Don't aggregate huge arrays unless requested
+        )
+        
+        # Global Log
+        log_file = os.path.join(output_dir, "elastic_global_log.txt")
+        with open(log_file, "w") as f:
+            f.write("Step Eps_xx Sig_xx(GPa) Sig_yy(GPa) Sig_zz(GPa)\n")
+            for s in range(len(eps_macro)):
+                f.write(f"{s} {eps_macro[s][0,0]:.6e} {sig_macro[s][0,0]/1e9:.6e} {sig_macro[s][1,1]/1e9:.6e} {sig_macro[s][2,2]/1e9:.6e}\n")
+        
+        print(f"\nLinear Elastic Simulation complete. Results in '{output_dir}'")
+        
+        # Plotting
+        if out_cfg.get('enable_plotting', False):
+            strain_xx = [eps[0,0] * 100 for eps in eps_macro] # %
+            stress_xx = [sig[0,0] / 1e9 for sig in sig_macro] # GPa
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(strain_xx, stress_xx, 'b-o', markersize=2)
+            plt.xlabel('Strain (%)')
+            plt.ylabel('Stress (GPa)')
+            plt.title(f"MGKMC Linear Elasticity: {args.config}")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "stress_strain.png"))
+            plt.close()
+            print("Plot generated.")
+            
+        return
+
+    # ---------------------------------------------------------
+    # KMC / Thermal Simulation Branch
+    # ---------------------------------------------------------
     if should_resume:
         print(f"Loading state from {resume_path}...")
-        sim = AthermalSimulation.load_checkpoint(resume_path)
+        sim = ThermalSimulation.load_checkpoint(resume_path)
         # Re-apply some output settings from current config
         sim.output_dir = output_dir
     else:
-        sim = AthermalSimulation(
+        sim = ThermalSimulation(
             nx, ny, nz,
             M=int(sys_cfg['M']),
             gamma0=float(sys_cfg['gamma0']),
@@ -183,7 +271,9 @@ def main():
             nu0=float(dyn_cfg.get('nu0', 1e13)),
             q_act_temp=float(phys_cfg.get('q_act_temp', 0.37)),
             instability_mode=dyn_cfg.get('instability_mode', 'cascade'),
-            cascade_timing=dyn_cfg.get('cascade_timing', 'none')
+            cascade_timing=dyn_cfg.get('cascade_timing', 'none'),
+            scale_rate_by_volume=dyn_cfg.get('scale_rate_by_volume', True),
+            fast_patching=dyn_cfg.get('fast_patching', {})
         )
 
     # 5. Run Mixed BC Simulation

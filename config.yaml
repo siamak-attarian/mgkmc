@@ -5,6 +5,10 @@
 # RNG Settings
 seed: 42
 
+# Main Simulation Mode
+# Options: "kmc" (default) or "linear_elastic"
+simulation_type: "kmc"
+
 # System Geometry
 system:
   nx: 128
@@ -91,6 +95,10 @@ barriers:
 
 # Simulation Dynamics
 dynamics:
+  fast_patching:
+    enabled: true            # Use local patch updating instead of global FFT per flip
+    patch_radius: 3          # Size of the truncated Kernel (e.g. radius=3 means 7x7x7)
+    sync_interval: 100       # Number of KMC events before the exact global FFT re-synchronizes the grid
   temperature: 300.0              # Temperature (K)
   physical_strain_rate: 1.0e7     # Physical strain rate (1/s)
   eps_target: 0.14                # Target global strain
@@ -98,6 +106,7 @@ dynamics:
   nu0: 1.0e13                     # Attempt frequency (Hz)
   instability_mode: "cascade"     # "cascade" (collective) or "kmc" (sequential)
   cascade_timing: "none"          # "none", "single" (1/nu0), or "per_flip" (N/nu0)
+  scale_rate_by_volume: true      # [NEW] Toggle whether to multiply rate by voxel volume
 
 # Boundary Conditions
 boundary_conditions:
@@ -110,6 +119,7 @@ boundary_conditions:
 # Output & Logging
 output:
   directory: "simulation_results"
+  duplicate_directory_action: "delete" # Options: "delete" or "rename"
   checkpoint_interval: 100
   checkpoint_mode: none         # "periodic", "current", "last", or "none"
   checkpoint_elastic_only: true  # [NEW] Only save checkpoints on elastic steps

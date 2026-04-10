@@ -6,14 +6,14 @@ import matplotlib.pyplot as plt
 # Ensure mgkmc is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.stz.barriers import compute_barrier
 from mgkmc.stz.kmc import compute_rates
 
 def analyze_checkpoint(cp_path):
     print(f"Loading {cp_path}...")
     try:
-        sim = AthermalSimulation.load_checkpoint(cp_path)
+        sim = ThermalSimulation.load_checkpoint(cp_path)
     except Exception as e:
         print(f"Failed to load checkpoint: {e}")
         return

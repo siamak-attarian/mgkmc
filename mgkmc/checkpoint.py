@@ -17,7 +17,7 @@ def save_checkpoint(sim, filename):
     
     Parameters
     ----------
-    sim : AthermalSimulation
+    sim : ThermalSimulation
         Simulation instance to save
     filename : str
         Path to checkpoint file (will create .h5 extension if not present)
@@ -204,7 +204,7 @@ def load_checkpoint(filename):
     
     Returns
     -------
-    sim : AthermalSimulation
+    sim : ThermalSimulation
         Reconstructed simulation instance
     
     Notes
@@ -224,7 +224,7 @@ def load_checkpoint(filename):
     print(f"Loading checkpoint from {filename}...")
     
     # Import here to avoid circular dependency
-    from mgkmc import AthermalSimulation
+    from mgkmc import ThermalSimulation
     from mgkmc.stz.voxel import Voxel
     
     with h5py.File(filename, 'r') as f:
@@ -283,7 +283,7 @@ def load_checkpoint(filename):
         def dummy_barrier_gen(n):
             return np.ones(n)
         
-        sim = AthermalSimulation(
+        sim = ThermalSimulation(
             nx, ny, nz,
             M=M,
             gamma0=gamma0,

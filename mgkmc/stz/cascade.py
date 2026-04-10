@@ -57,11 +57,17 @@ def apply_flip_soa(eps_plastic_field, key_field, soft_prop_field, last_event_tim
         for j in range(3):
             eps_plastic_field[x,y,z,i,j] += catalog[x,y,z,m,i,j]
             
-     # 2. Update Softening (Match C code DeltaSoftening logic)
-    sum_sq = 0.0
-    for i in range(3):
-        for j in range(3):
-            sum_sq += catalog[x,y,z,m,i,j]**2
+     # 2. Update Softening (Von Mises equivalent strain squared)
+    e11 = catalog[x,y,z,m,0,0]
+    e22 = catalog[x,y,z,m,1,1]
+    e33 = catalog[x,y,z,m,2,2]
+    e12 = catalog[x,y,z,m,0,1]
+    e13 = catalog[x,y,z,m,0,2]
+    e23 = catalog[x,y,z,m,1,2]
+
+    # Eq (18) from the 2013 paper
+    sum_sq = (e12**2 + e23**2 + e13**2) + \
+             ((e22 - e33)**2 + (e33 - e11)**2 + (e11 - e22)**2) / 6.0
     
     gp = soft_prop_field[x,y,z,0]
     

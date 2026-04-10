@@ -5,7 +5,7 @@ import sys
 # Ensure we can import mgkmc
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.stz.barriers import compute_barrier
 # Import from modules to ensure we call the fixed versions
 from mgkmc.stz.cascade import find_unstable, apply_flip
@@ -13,7 +13,7 @@ from mgkmc.stz.kmc import compute_rates, select_event
 
 def inspect_checkpoint(cp_path, voxel_indices):
     print(f"Loading {cp_path}...")
-    sim = AthermalSimulation.load_checkpoint(cp_path)
+    sim = ThermalSimulation.load_checkpoint(cp_path)
     
     print("\n--- Simulation State (Initial) ---")
     print(f"Time: {sim.time:.4e} s")
@@ -112,7 +112,7 @@ def inspect_checkpoint(cp_path, voxel_indices):
              # Actually, update_stress is critical. Let's try to call it.
              # from mgkmc.aqs import update_stress_fft_full # it is not exported there, it's in aqs.py?
              # No, it's a standalone function in aqs.py? It's imported in aqs.py. It's likely in mgkmc.stress_update?
-             # Let's inspect AthermalSimulation.update_stress_fft_full source location?
+             # Let's inspect ThermalSimulation.update_stress_fft_full source location?
              # Checking imports in aqs.py: from mgkmc.stress_update import update_stress_fft_full
              
              pass

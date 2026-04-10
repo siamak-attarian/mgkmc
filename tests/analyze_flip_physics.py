@@ -5,7 +5,7 @@ import os
 # Ensure we can import mgkmc
 sys.path.append(os.getcwd())
 
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.stz.grid import initialize_grid
 from mgkmc.stz.catalog import stz_catalog_glass
 from mgkmc.stz.barriers import compute_barrier

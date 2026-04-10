@@ -1,7 +1,7 @@
 
 import numpy as np
 import os
-from mgkmc.aqs import AthermalSimulation
+from mgkmc.aqs import ThermalSimulation
 
 def test_kmc_t0():
     print("\n--- Testing T=0 (No KMC) ---")
@@ -12,7 +12,7 @@ def test_kmc_t0():
     E = np.ones((nx, ny, nz)) * 70.0 # GPa
     nu = np.ones((nx, ny, nz)) * 0.3
     
-    sim = AthermalSimulation(nx, ny, nz, M, gamma0, E, nu, 
+    sim = ThermalSimulation(nx, ny, nz, M, gamma0, E, nu, 
                              output_dir="output_test_t0",
                              temperature=0.0,
                              strain_rate=1.0)
@@ -48,7 +48,7 @@ def test_kmc_t300():
     # If strain rate is 1.0 -> dt_elastic ~ 0.002 s.
     # So we should see MANY KMC events.
     
-    sim = AthermalSimulation(nx, ny, nz, M, gamma0, E, nu, 
+    sim = ThermalSimulation(nx, ny, nz, M, gamma0, E, nu, 
                              output_dir="output_test_t300",
                              temperature=1000.0, # High T to guarantee events
                              strain_rate=1.0)

@@ -4,7 +4,7 @@ This version adds timing measurements to each major operation.
 """
 import numpy as np
 import time
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.elasticity import get_uniaxial_stress_x
 
 # Monkey-patch the AQS run method to add timing
@@ -12,7 +12,7 @@ import mgkmc.aqs
 from mgkmc.stz.update_fft import update_stress_fft_full
 from mgkmc.stz.cascade import find_unstable, apply_flip
 
-original_run = mgkmc.aqs.AthermalSimulation.run
+original_run = mgkmc.aqs.ThermalSimulation.run
 
 def instrumented_run(self, n_global_steps, strain_increment_tensor=None, vtk_mode="global", 
                      loading_func=None, loading_params=None):
@@ -119,7 +119,7 @@ def instrumented_run(self, n_global_steps, strain_increment_tensor=None, vtk_mod
     print("=" * 60)
 
 # Monkey-patch
-mgkmc.aqs.AthermalSimulation.run = instrumented_run
+mgkmc.aqs.ThermalSimulation.run = instrumented_run
 
 def main():
     print("=" * 60)
@@ -147,7 +147,7 @@ def main():
         random_barriers = np.random.normal(loc=2.0, scale=0.6, size=n_modes)
         return np.clip(random_barriers, a_min=0.5, a_max=None)
     
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz, M=M, gamma0=gamma0,
         E_field=E, nu_field=nu, pixel=pixel,
         barrier_generator=my_barrier_generator,

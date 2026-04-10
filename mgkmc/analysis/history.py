@@ -22,7 +22,7 @@ def load_simulation(checkpoint_file):
     
     Returns
     -------
-    sim : AthermalSimulation
+    sim : ThermalSimulation
         Loaded simulation instance
     
     Examples

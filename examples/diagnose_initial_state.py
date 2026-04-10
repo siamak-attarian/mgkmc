@@ -1,6 +1,6 @@
 import numpy as np
 import os
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.stz.barriers import compute_barrier
 from mgkmc.stz.kmc import compute_rates
 
@@ -39,7 +39,7 @@ def main():
         return clipped_barriers
     
     # 2. Initialize Simulation
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz, M, gamma0, E, nu, pixel=pixel,
         barrier_generator=my_barrier_generator,
         temperature=TEMPERATURE,

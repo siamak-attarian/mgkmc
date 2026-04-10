@@ -2,7 +2,7 @@ import numpy as np
 import os
 import shutil
 import argparse
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.stz.cascade import apply_flip
 from mgkmc.stz.update_fft import update_stress_fft_full
 
@@ -30,11 +30,11 @@ def visualize_cascade(step=753, data_dir="aqs_demo_5_mixed_checkpoint_shearband"
     
     # 2. Load Data
     print(f"Loading previous state from Step {prev_step}...")
-    sim = AthermalSimulation.load_checkpoint(cp_prev)
+    sim = ThermalSimulation.load_checkpoint(cp_prev)
     
     print(f"Loading history from Step {step} (just for flip list)...")
     # We load into a temporary sim just to get the history list
-    sim_target = AthermalSimulation.load_checkpoint(cp_curr)
+    sim_target = ThermalSimulation.load_checkpoint(cp_curr)
     full_history = sim_target.flip_event_history
     
     # Filter flips for the target step

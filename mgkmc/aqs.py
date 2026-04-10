@@ -11,7 +11,7 @@ from mgkmc.stz.barriers import compute_barrier
 from mgkmc.checkpoint import save_checkpoint, load_checkpoint
 from mgkmc.stz.barrier_generators import get_barrier_generator
 
-class AthermalSimulation:
+class ThermalSimulation:
     def __init__(self, 
                  nx, ny, nz, 
                  M, gamma0, 
@@ -35,7 +35,9 @@ class AthermalSimulation:
                  nu0=1e13,                 # Attempt frequency (Hz)
                  q_act_temp=0.37,          # Activation barrier for JT recovery (eV)
                  instability_mode="cascade", # "cascade" or "kmc"
-                 cascade_timing="none"       # "none", "single", or "per_flip"
+                 cascade_timing="none",      # "none", "single", or "per_flip"
+                 scale_rate_by_volume=True,
+                 fast_patching=None
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -66,6 +68,7 @@ class AthermalSimulation:
         self.q_act_temp = q_act_temp
         self.instability_mode = instability_mode
         self.cascade_timing = cascade_timing
+        self.scale_rate_by_volume = scale_rate_by_volume
 
         # Dynamic calculation of tau if not provided
         if self.temperature > 0 and (self.tau is None or self.tau == np.inf):
@@ -85,7 +88,7 @@ class AthermalSimulation:
         # ================= SoA Arrays =================
         # 1. State Fields
         if E_field.mean() < 1e6:
-            print(" [AthermalSimulation] Detected E in GPa (mean < 1 MPa). Converting to Pa (*1e9).")
+            print(" [ThermalSimulation] Detected E in GPa (mean < 1 MPa). Converting to Pa (*1e9).")
             self.E_field = E_field * 1e9
         else:
             self.E_field = E_field
@@ -138,6 +141,55 @@ class AthermalSimulation:
         self.history_global = [] 
         self.flip_event_history = []  # List of (global_step, local_step, x, y, z, mode)
         self.solver_args = {}
+        
+        # Fast Patching (Predictor-Corrector) Setup
+        self.fast_patching_enabled = fast_patching.get('enabled', False) if fast_patching else False
+        self.patch_radius = fast_patching.get('patch_radius', 3) if fast_patching else 3
+        self.sync_interval = fast_patching.get('sync_interval', 100) if fast_patching else 100
+        self.flips_since_sync = 0
+        self.sigma_macro_unit = None
+        if self.fast_patching_enabled:
+            self._precompute_patch_kernels()
+
+    def _precompute_patch_kernels(self):
+        print("\n [ThermalSimulation] Pre-computing Truncated Green's Function Stress Patches...")
+        R = self.patch_radius
+        nx, ny, nz = self.grid_shape
+        # 5 orthogonal basis trace-free pure shear tensors
+        bases = [
+            np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, 0]]),
+            np.array([[0, 0, 0], [0, 1.0, 0], [0, 0, -1.0]]),
+            np.array([[0, 1.0, 0], [1.0, 0, 0], [0, 0, 0]]),
+            np.array([[0, 0, 1.0], [0, 0, 0], [1.0, 0, 0]]),
+            np.array([[0, 0, 0], [0, 0, 1.0], [0, 1.0, 0]])
+        ]
+        self.patch_kernels = []
+        self.patch_missing_mean = []
+        for P in bases:
+            eps_plas = np.zeros((nx, ny, nz, 3, 3))
+            eps_plas[nx//2, ny//2, nz//2] = P
+            eps_mac = np.zeros((3,3))
+            _, sig_field, _, _ = update_stress_fft_full(
+                eps_plas, eps_mac, self.E, self.nu, pixel=self.pixel, **self.solver_args
+            )
+            
+            sig_rolled = np.roll(sig_field, shift=(-(nx//2), -(ny//2), -(nz//2)), axis=(0,1,2))
+            crop = np.zeros((2*R+1, 2*R+1, 1 if nz==1 else 2*R+1, 3, 3))
+            for dx in range(-R, R+1):
+                for dy in range(-R, R+1):
+                    for dz in range(-R if nz>1 else 0, R+1 if nz>1 else 1):
+                        crop[dx+R, dy+R, dz+R if nz>1 else 0] = sig_rolled[dx % nx, dy % ny, dz % nz]
+            self.patch_kernels.append(crop)
+            
+            full_mean = np.mean(sig_field, axis=(0,1,2))
+            crop_sum = np.sum(crop, axis=(0,1,2))
+            # The missing uniform background shift to conserve volume expansion relaxation
+            missing_mean = full_mean - (crop_sum / (nx * ny * np.maximum(1, nz)))
+            if nz == 1:
+                missing_mean = full_mean - (crop_sum / (nx * ny))
+            self.patch_missing_mean.append(missing_mean)
+            
+        print(f" [ThermalSimulation] 5 Patch Kernels of radius {R} computed and cached.\n")
 
     def export_vtk(self, filename):
         """Export current state to VTK."""
@@ -336,9 +388,9 @@ class AthermalSimulation:
             max_cascade_steps = int(self.max_cascade_steps_pct * self.total_voxels)
             if local_step > max_cascade_steps:
                 print(f"Cascade limit reached ({local_step} steps > {self.max_cascade_steps_pct*100:.1f}% of {self.total_voxels} voxels)")
-                return local_step, total_flips, self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2)), True, False
+                return local_step, total_flips, self.eps_macro.copy(), self.sig_field.mean(axis=(0,1,2)), True, False
                  
-        eps_curr = self.eps_field.mean(axis=(0,1,2))
+        eps_curr = self.eps_macro.copy()
         sig_curr = self.sig_field.mean(axis=(0,1,2))
         return local_step, total_flips, eps_curr, sig_curr, False, False
 
@@ -406,7 +458,7 @@ class AthermalSimulation:
                        In 'kmc' mode, this is 0.
             cascade_flips: Number of flips in this specific entry.
             """
-            eps_curr, sig_curr = self.eps_field.mean(axis=(0,1,2)), self.sig_field.mean(axis=(0,1,2))
+            eps_curr, sig_curr = self.eps_macro.copy(), self.sig_field.mean(axis=(0,1,2))
             # Global log uses original total_flips logic (sum of flips)
             self.log_global(current_step, elastic_steps_done, total_kmc_steps, self.time, eps_curr, sig_curr, cascade_id, cascade_flips)
             self.history_global.append((eps_curr[0,0], sig_curr[0,0]/1e9))
@@ -508,7 +560,8 @@ class AthermalSimulation:
 
                 # SHARED: Rate calculation
                 # In 'kmc' mode, compute_rates will include Q <= 0
-                rates_flat, indices_flat, total_rate = compute_rates(self.Q, self.volume, self.temperature, self.nu0, instability_mode=self.instability_mode)
+                eff_volume = self.volume if self.scale_rate_by_volume else 1.0
+                rates_flat, indices_flat, total_rate = compute_rates(self.Q, eff_volume, self.temperature, self.nu0, instability_mode=self.instability_mode)
                 
                 if total_rate > 0:
                     u = np.random.uniform()
@@ -525,9 +578,11 @@ class AthermalSimulation:
                         x, y, z, m = decode_index(indices_flat[idx_flat], self.grid_shape[1], self.grid_shape[2], self.M)
                         is_instab = self.Q[x,y,z,m] <= self.stability_threshold
                         
+                        C = self.catalog[x,y,z,m].copy()
+                        
                         apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
                                        self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
-                        self.prev_strain_dir[x,y,z] = self.catalog[x,y,z,m]
+                        self.prev_strain_dir[x,y,z] = C
                         
                         if self.redraw_directions or self.redraw_barriers:
                             if self.redraw_directions: self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
@@ -536,9 +591,44 @@ class AthermalSimulation:
                             self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
                             self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
                         
-                        self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                            self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                        )
+                        if getattr(self, 'fast_patching_enabled', False):
+                            if self.sigma_macro_unit is None:
+                                eps_plas = np.zeros_like(self.eps_plastic)
+                                _, self.sigma_macro_unit, _, _ = update_stress_fft_full(
+                                    eps_plas, strain_unit_tensor, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                                )
+                            if t_wait > 0:
+                                self.sig_field += self.sigma_macro_unit * (self.strain_rate * t_wait)
+                            
+                            c0, c1, c2, c3, c4 = C[0,0], -C[2,2], C[0,1], C[0,2], C[1,2]
+                            patch = (c0 * self.patch_kernels[0] + c1 * self.patch_kernels[1] + 
+                                     c2 * self.patch_kernels[2] + c3 * self.patch_kernels[3] + 
+                                     c4 * self.patch_kernels[4])
+                            
+                            mean_shift = (c0 * self.patch_missing_mean[0] + c1 * self.patch_missing_mean[1] + 
+                                          c2 * self.patch_missing_mean[2] + c3 * self.patch_missing_mean[3] + 
+                                          c4 * self.patch_missing_mean[4])
+                            
+                            nx, ny, nz = self.grid_shape
+                            R = self.patch_radius
+                            for dx in range(-R, R+1):
+                                for dy in range(-R, R+1):
+                                    for dz in range(-R if nz>1 else 0, R+1 if nz>1 else 1):
+                                        px, py, pz = (x+dx)%nx, (y+dy)%ny, (z+dz)%nz
+                                        self.sig_field[px, py, pz] += patch[dx+R, dy+R, dz+R if nz>1 else 0]
+                            
+                            self.sig_field += mean_shift
+                            
+                            self.flips_since_sync += 1
+                            if self.flips_since_sync >= self.sync_interval:
+                                self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                                    self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                                )
+                                self.flips_since_sync = 0
+                        else:
+                            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                            )
                         
                         log_type = "kmc_instab" if is_instab else "kmc"
                         # In KMC mode, cascade counter is 0 as per request
@@ -684,6 +774,7 @@ class AthermalSimulation:
                     meta.attrs['neighbor_softening_fraction'] = self.neighbor_softening_fraction
                     meta.attrs['softening_cap'] = self.softening_cap
                     meta.attrs['softening_scheme'] = self.softening_scheme
+                    meta.attrs['scale_rate_by_volume'] = self.scale_rate_by_volume
                     fields = f.create_group('fields')
                     fields.create_dataset('eps_field', data=self.eps_field, compression='gzip')
                     fields.create_dataset('sig_field', data=self.sig_field, compression='gzip')
@@ -711,7 +802,7 @@ class AthermalSimulation:
     @classmethod
     def load_checkpoint(cls, path):
         """
-        Load AthermalSimulation from an HDF5 checkpoint.
+        Load ThermalSimulation from an HDF5 checkpoint.
         """
         import h5py
         with h5py.File(path, "r") as f:
@@ -728,7 +819,8 @@ class AthermalSimulation:
                       strain_rate=meta.attrs['strain_rate'], jp=meta.attrs['jp'], jt=meta.attrs['jt'],
                       neighbor_softening_fraction=meta.attrs.get('neighbor_softening_fraction', 0.0),
                       softening_cap=meta.attrs['softening_cap'], softening_scheme=meta.attrs['softening_scheme'],
-                      nu0=meta.attrs.get('nu0', 1e13), q_act_temp=meta.attrs.get('q_act_temp', 0.37))
+                      nu0=meta.attrs.get('nu0', 1e13), q_act_temp=meta.attrs.get('q_act_temp', 0.37),
+                      scale_rate_by_volume=meta.attrs.get('scale_rate_by_volume', True))
             
             sim.time = meta.attrs.get('sim_time', 0.0)
             sim.eps_field = fields['eps_field'][:]

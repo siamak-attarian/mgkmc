@@ -2,7 +2,7 @@ import numpy as np
 import os
 import shutil
 import matplotlib.pyplot as plt
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 
 def run_sim(label, softening_enabled, softening_params=None, color='b'):
     print(f"\n[Run] {label}...")
@@ -30,7 +30,7 @@ def run_sim(label, softening_enabled, softening_params=None, color='b'):
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
         
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz, M, gamma0, E, nu,
         output_dir=output_dir,
         softening_enabled=softening_enabled,

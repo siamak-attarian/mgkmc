@@ -4,7 +4,7 @@ Compare performance before/after and verify correctness.
 """
 import numpy as np
 import time
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.elasticity import get_uniaxial_stress_x
 
 def main():
@@ -34,7 +34,7 @@ def main():
         return np.clip(random_barriers, a_min=0.5, a_max=None)
     
     print("\nInitializing simulation with VECTORIZED directional softening...")
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz, M=M, gamma0=gamma0,
         E_field=E, nu_field=nu, pixel=pixel,
         barrier_generator=my_barrier_generator,

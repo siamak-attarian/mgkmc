@@ -2,7 +2,7 @@
 import numpy as np
 import os
 import shutil
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 from mgkmc.elasticity import get_uniaxial_stress_x
 
 # Setup
@@ -21,7 +21,7 @@ if os.path.exists(CHECKPOINT_FILE):
     os.remove(CHECKPOINT_FILE)
 
 print("Creating simulation...")
-sim1 = AthermalSimulation(
+sim1 = ThermalSimulation(
     nx, ny, nz,
     M=10,
     gamma0=0.14,
@@ -47,7 +47,7 @@ print(f"\nSaving checkpoint...")
 sim1.save_checkpoint(CHECKPOINT_FILE)
 
 print(f"Loading checkpoint...")
-sim2 = AthermalSimulation.load_checkpoint(CHECKPOINT_FILE)
+sim2 = ThermalSimulation.load_checkpoint(CHECKPOINT_FILE)
 
 print(f"Loaded. Stress: {sim2.history_global[-1][1]:.4f} GPa")
 

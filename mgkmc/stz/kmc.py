@@ -12,7 +12,7 @@ def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="casc
     """
     nx, ny, nz, M = Q_field.shape
     kB = 8.617e-5
-    beta = 1.0 / (kB * temperature) if temperature > 0 else 0.0
+    beta = 1.0 / (kB * temperature) if temperature > 0 else np.inf
     
     # We'll return everything and let selection handle zeros?
     # No, selection needs compact array.

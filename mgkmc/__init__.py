@@ -11,7 +11,7 @@ from .analysis import plot_fields
 
 from .solver import run_simulation, run_mixed_simulation, spectral_solver_3d
 from .analysis import export_simulation_vtk
-from .aqs import AthermalSimulation
+from .aqs import ThermalSimulation
 
 # Checkpoint and post-processing tools
 from . import checkpoint

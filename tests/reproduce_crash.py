@@ -1,7 +1,7 @@
 import numpy as np
 import os
 import shutil
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 
 def main():
     # 16x16x1 for speed
@@ -24,7 +24,7 @@ def main():
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
         
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz,
         M=M, 
         gamma0=gamma0,

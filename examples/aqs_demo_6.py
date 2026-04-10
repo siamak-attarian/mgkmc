@@ -1,7 +1,7 @@
 import numpy as np
 import os
 import shutil
-from mgkmc import AthermalSimulation
+from mgkmc import ThermalSimulation
 
 def main():
     print("=" * 60)
@@ -63,7 +63,7 @@ def main():
         except OSError:
              print(f"Warning: Could not remove {OUTPUT_DIR}. Using existing directory.")
         
-    sim = AthermalSimulation(
+    sim = ThermalSimulation(
         nx, ny, nz,
         M=M, 
         gamma0=gamma0,
