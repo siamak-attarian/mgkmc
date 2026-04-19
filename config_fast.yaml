@@ -1,0 +1,82 @@
+barriers:
+  kwargs:
+    mean: 2.0
+    min_cutoff: 0.0
+    std: 0.4
+  type: gaussian
+boundary_conditions:
+  driving_component:
+  - 0
+  - 0
+  mixed_targets:
+    '[1, 1]': 0.0
+    '[2, 2]': 0.0
+  mixed_tol: 1.0
+detection:
+  ignore_drop_steps: 10
+  max_cascade_steps_pct: 0.3
+  max_kmc_steps_pct: 0.3
+  stop_on_stress_drop: 0.2
+  stop_post_drop_steps: 20
+  stress_drop_lookback: 10
+dynamics:
+  cascade_timing: none
+  eps_target: 0.14
+  fast_patching:
+    enabled: true
+    patch_radius: 3
+    sync_interval: 100
+  instability_mode: cascade
+  n_steps: 10
+  nu0: 1.0e13
+  physical_strain_rate: 1.0e7
+  scale_rate_by_volume: true
+  temperature: 300.0
+material:
+  E:
+    mode: constant
+    value: 70
+  nu:
+    mode: constant
+    value: 0.3
+output:
+  checkpoint_elastic_only: true
+  checkpoint_interval: 100
+  checkpoint_mode: none
+  directory: simulation_results
+  duplicate_directory_action: delete
+  enable_cascade_log: true
+  enable_config_backup: true
+  enable_console: true
+  enable_global_log: true
+  enable_kmc_log: true
+  enable_plotting: true
+  enable_save_q: false
+  enable_summary_log: true
+  save_q_elastic_only: true
+  save_q_interval: 1
+  summary_filename: summary_log.txt
+  track_cascades: false
+  vtk_interval: 100
+  vtk_mode: elastic
+physics:
+  enable_softening: true
+  jp: 20
+  jt: 20
+  neighbor_softening_fraction: 0.0
+  q_act_temp: 0.37
+  redraw_barriers: true
+  redraw_directions: true
+  softening_cap: 0.916
+  softening_scheme: directional
+  stability_threshold: 0.0
+seed: 42
+simulation_type: kmc
+system:
+  M: 20
+  gamma0: 0.14
+  num_threads: 1
+  nx: 128
+  ny: 128
+  nz: 1
+  pixel: 0.7
