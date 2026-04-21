@@ -7,80 +7,44 @@ sys.path.append(os.getcwd())
 
 from mgkmc.stz.barriers import compute_barrier
 
-class MockVoxel:
-    def __init__(self, M=1):
-        self.M = M
-        self.sigma = np.zeros((3,3)) # Pa
-        self.eps_plastic = np.zeros((3,3))
-        self.catalog = [np.zeros((3,3))] # gamma
-        self.Q0 = np.array([1.0]) # eV
-        self.g_p = 0.0
-        self.g_t = 0.0
-        self.flip_count_total = 0
-
 def test_barrier_work_calculation():
     print("--- Testing Barrier Work Calculation ---")
     
     # 1. Setup
-    voxel = MockVoxel(M=1)
+    nx, ny, nz, M = 1, 1, 1, 1
+    Q = np.zeros((nx, ny, nz, M))
+    Q0 = np.full((nx, ny, nz, M), 1.0)
+    sig_field = np.zeros((nx, ny, nz, 3, 3))
+    sig_field[0,0,0,0,1] = 1e9 # 1 GPa
+    sig_field[0,0,0,1,0] = 1e9
+    
+    catalog = np.zeros((nx, ny, nz, M, 3, 3))
+    catalog[0,0,0,0,0,1] = 0.1
+    catalog[0,0,0,0,1,0] = 0.1
+    
     volume = 1.0 # nm^3
-    
-    # Stress: 1 GPa pure shear in XY
-    # Tensor: 
-    # [[0, 1, 0]
-    #  [1, 0, 0]
-    #  [0, 0, 0]] GPa
-    sigma_GPa = np.zeros((3,3))
-    sigma_GPa[0,1] = 1.0
-    sigma_GPa[1,0] = 1.0
-    
-    voxel.sigma = sigma_GPa * 1e9 # Convert to Pa for simulation state
-    
-    # Transformation Strain (Gamma): Pure shear 0.1 in XY
-    gamma = np.zeros((3,3))
-    gamma[0,1] = 0.1
-    gamma[1,0] = 0.1
-    voxel.catalog = [gamma]
-    
-    # Expected Work
-    # W = 0.5 * V * (sigma : gamma)
-    # sigma : gamma = sum(sigma_ij * gamma_ij) = (1*0.1) + (1*0.1) = 0.2 GPa
-    # W = 0.5 * 1.0 nm^3 * 0.2 GPa
-    # Unit conversion: 1 GPa * nm^3 = 1e-18 J * 1e-27 m^3 ... wait.
-    # 1 GPa = 1e9 N/m^2 = 1e-9 N/nm^2
-    # Energy = Force * dist = (stress * area) * dist = stress * volume
-    # 1 GPa * 1 nm^3 = (1e-9 N/nm^2) * 1 nm^3 = 1e-9 N * nm = 1e-9 Joules? NO.
-    
-    # Let's check the code's constant: 6.241509
-    # 1 Joule = 6.241509e18 eV
-    
-    # 1 Pa * m^3 = 1 Joule
-    # 1 GPa = 1e9 Pa
-    # 1 nm^3 = 1e-27 m^3
-    # 1 GPa * nm^3 = 1e9 * 1e-27 Joules = 1e-18 Joules
-    
-    # 1 eV = 1.602e-19 Joules
-    # So 1 GPa * nm^3 = 1e-18 J / 1.602e-19 J/eV = 10 / 1.602 = 6.2415 eV
-    
-    # So: Work (eV) = (Stress_in_GPa * Volume_in_nm3) * 6.2415
-    
-    # For our manual Calc:
-    # sigma_double_dot_gamma = 0.2 (dimensionless if gamma is strain)
-    # Work_GPa_nm3 = 0.5 * 1.0 * 0.2 = 0.1
-    # Work_eV = 0.1 * 6.241509 = 0.6241509 eV
+    soft_prop = np.zeros((nx, ny, nz, 4))
+    last_event_time = np.full((nx, ny, nz), -np.inf)
+    time = 0.0
+    prev_strain_dir = np.zeros((nx, ny, nz, 3, 3))
+    softening_cap = 2.0
+    scheme = 0
+    tau = np.inf
     
     # Run code
-    Q = compute_barrier(voxel, volume, debug=True)
-    
-    # Q = Q0 - Work = 1.0 - 0.6241509 = 0.375849
+    compute_barrier(Q, Q0, sig_field, catalog, volume,
+                    soft_prop, last_event_time, time, 
+                    prev_strain_dir, softening_cap,
+                    scheme, tau)
     
     print(f"\nExpected Work: ~0.62415 eV")
-    print(f"Computed Q[0]: {Q[0]:.6f} eV")
+    print(f"Computed Q[0]: {Q[0,0,0,0]:.6f} eV")
     
-    if abs(Q[0] - (1.0 - 0.6241509)) < 1e-4:
+    if abs(Q[0,0,0,0] - (1.0 - 0.6241509)) < 1e-4:
         print("PASS: Barrier calculation matches manual expectation.")
     else:
-        print(f"FAIL: Mismatch. Expected {1.0 - 0.6241509:.6f}, got {Q[0]:.6f}")
+        print(f"FAIL: Mismatch. Expected {1.0 - 0.6241509:.6f}, got {Q[-1]:.6f}")
+        assert False
 
 def test_solver_units():
     print("\n--- Testing Spectral Solver Units ---")
