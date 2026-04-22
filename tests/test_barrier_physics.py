@@ -48,7 +48,7 @@ def test_barrier_work_calculation():
 
 def test_solver_units():
     print("\n--- Testing Spectral Solver Units ---")
-    from mgkmc.solver import spectral_solver_3d
+    from mgkmc.linear_elastic_simulator import spectral_solver_3d
     
     # 16x16x1 Grid
     nx, ny, nz = 16, 16, 1

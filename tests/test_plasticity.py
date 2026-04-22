@@ -5,7 +5,7 @@ import os
 # Ensure we can import mgkmc
 sys.path.append(os.getcwd())
 
-from mgkmc.solver import spectral_solver_3d
+from mgkmc.linear_elastic_simulator import spectral_solver_3d
 
 def test_plastic_relaxation():
     print("\n--- Testing Plastic Relaxation ---")

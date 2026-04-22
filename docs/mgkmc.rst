@@ -53,10 +53,10 @@ mgkmc.microstructure module
    :show-inheritance:
    :undoc-members:
 
-mgkmc.solver module
--------------------
+mgkmc.linear_elastic_simulator module
+-------------------------------------
 
-.. automodule:: mgkmc.solver
+.. automodule:: mgkmc.linear_elastic_simulator
    :members:
    :show-inheritance:
    :undoc-members:

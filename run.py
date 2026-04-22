@@ -184,7 +184,7 @@ def main():
     
     if simulation_type == "linear_elastic":
         if dimensionality == "2d":
-            from mgkmc.solver import linear_elastic_simulation_2d
+            from mgkmc.linear_elastic_simulator import linear_elastic_simulation_2d
             out_dir = out_conf.get('directory', 'output')
             os.makedirs(out_dir, exist_ok=True)
             
@@ -230,7 +230,7 @@ def main():
             print(f"2D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
             return
         elif dimensionality == "3d":
-            from mgkmc.solver import linear_elastic_simulation_3d
+            from mgkmc.linear_elastic_simulator import linear_elastic_simulation_3d
             out_dir = out_conf.get('directory', 'output')
             os.makedirs(out_dir, exist_ok=True)
 

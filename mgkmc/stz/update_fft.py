@@ -1,5 +1,5 @@
 import numpy as np
-from ..solver import spectral_solver_3d
+from ..linear_elastic_simulator import spectral_solver_3d
 
 def update_stress_fft_full(eps_plastic_field, eps_macro, E, nu, pixel=1.0,
                       max_iter=200, tol=1e-6, verbose=False):
