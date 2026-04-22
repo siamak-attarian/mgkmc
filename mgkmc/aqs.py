@@ -396,8 +396,7 @@ class ThermalSimulation:
 
     def run_mixed(self, n_global_steps, strain_rate, component=(0,1), 
                   stress_targets={}, mixed_tol=1e-4, mixed_max_iter=50,
-                  checkpoint_interval=None, checkpoint_path="checkpoint", 
-                  checkpoint_mode="periodic", 
+                  checkpoint_interval=None, checkpoint_path="checkpoint",  
                   stop_on_stress_drop=None, stress_drop_component=(0,1), stop_post_drop_steps=20,
                   vtk_interval=None, vtk_mode="none", # "none", "elastic", "kmc", "all"
                   track_cascades=False,
@@ -716,11 +715,19 @@ class ThermalSimulation:
                         print(f"\n[ALERT] Stress Drop Detected! {drop_frac*100:.1f}% at step {step}")
                         stop_drop_triggered = True
              
-            if checkpoint_interval and step % checkpoint_interval == 0 and checkpoint_mode in ["periodic", "current"]:
-                cp_name = f"{checkpoint_path}.h5" if checkpoint_mode == "current" else \
-                          (f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5" if checkpoint_elastic_only else f"{checkpoint_path}_{step:06d}.h5")
-                if checkpoint_elastic_only: elastic_chk_id += 1
-                self.save_checkpoint(cp_name, step=step)
+            if checkpoint_interval is not None and checkpoint_interval not in ["none", "last"]:
+                save_chk = False
+                cp_name = None
+                if checkpoint_interval == "current":
+                    save_chk = True
+                    cp_name = f"{checkpoint_path}.h5"
+                elif isinstance(checkpoint_interval, int) and step % checkpoint_interval == 0:
+                    save_chk = True
+                    cp_name = f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5" if checkpoint_elastic_only else f"{checkpoint_path}_{step:06d}.h5"
+                    if checkpoint_elastic_only: elastic_chk_id += 1
+                
+                if save_chk and cp_name:
+                    self.save_checkpoint(cp_name, step=step)
     
             if enable_save_q and save_q_interval and step % save_q_interval == 0:
                 should_save_q = True
@@ -734,9 +741,10 @@ class ThermalSimulation:
                 else: break
             step += 1
 
-        if checkpoint_mode == "last": self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
-        elif checkpoint_mode in ["periodic", "current"] and checkpoint_interval is not None and (step-1) % checkpoint_interval != 0:
-             self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
+        if checkpoint_interval == "last": 
+            self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
+        elif checkpoint_interval not in [None, "none", "last"] and isinstance(checkpoint_interval, int) and (step-1) % checkpoint_interval != 0:
+            self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)
 
         total_time = time.time() - start_time_total
         m, s = divmod(total_time, 60)

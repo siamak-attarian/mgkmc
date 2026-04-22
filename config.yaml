@@ -11,6 +11,8 @@ simulation_type: "kmc"
 
 # System Geometry
 system:
+  dimensionality: "3d" # Options: "2d" or "3d"
+  plane_mode: "plane_strain" # Options: "plane_strain" or "plane_stress" (ignored if not 2d)
   nx: 128
   ny: 128
   nz: 1
@@ -104,27 +106,29 @@ dynamics:
   temperature: 300.0              # [>=0] Operating Temperature (K)
   strain_rate_sensitivity: 0.0    # [>=0] 's' exponent for rate sensitivity (typically 0.0)
   physical_strain_rate: 1.0e7     # [>0] Physical macro strain rate (1/s)
-  eps_target: 0.14                # [>0] Target global macroscopic strain
-  n_steps: 1400                   # [>0] Number of global elastic loading steps
   nu0: 1.0e13                     # [>0] Attempt frequency (Hz)
   instability_mode: "cascade"     # 'cascade' (collective instability solver) or 'kmc' (sequential solver)
   cascade_timing: "none"          # 'none', 'single' (1/nu0 advance per iteration), or 'per_flip' (N/nu0 advance)
   scale_rate_by_volume: true      # Toggle whether to multiply activation rates by voxel volume
 
+# Loading
+loading:
+  eps_target: 0.14                # [>0] Target global macroscopic strain
+  step_size: 1.0e-4               # [>0] Strain increment per global elastic loading step
+
 # Boundary Conditions
 boundary_conditions:
-  driving_component: [0, 0]       # Index [i, j] for driven strain component (0,0 is xx)
+  driving_component: "xx"         # Driven strain component (e.g., xx, yy, xy)
   mixed_targets:                  # Stress targets for non-driven components (GPa)
-    "[1, 1]": 0.0                 # yy stress
-    "[2, 2]": 0.0                 # zz stress
+    yy: 0.0                       # yy stress
+    zz: 0.0                       # zz stress
   mixed_tol: 1.0                  # Tolerance for stress convergence (MPa)
 
 # Output & Logging
 output:
   directory: "simulation_results"
   duplicate_directory_action: "delete" # Options: "delete" or "rename"
-  checkpoint_interval: 100
-  checkpoint_mode: none         # "periodic", "current", "last", or "none"
+  checkpoint_interval: "none"    # "none", "current", "last", or an integer (e.g. 100)
   checkpoint_elastic_only: true  # [NEW] Only save checkpoints on elastic steps
   enable_save_q: false            # [NEW] Explicit toggle for saving Q
   save_q_interval: 1              # [NEW] Interval to save effective barriers (Q) as .npy files
