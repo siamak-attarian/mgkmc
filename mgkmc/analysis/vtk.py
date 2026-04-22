@@ -11,7 +11,16 @@ def reconstruct_displacement_element_centered(eps, pixel=1.0):
     - First element center is at (pixel/2, pixel/2, pixel/2).
     """
 
-    nx, ny, nz = eps.shape[:3]
+    if eps.ndim == 4: # 2D (nx, ny, 2, 2)
+        nx, ny = eps.shape[:2]
+        nz = 1
+        # Expand 2D eps to 3D eps (nx, ny, 1, 3, 3)
+        # We assume plane strain (eps_zz=0) for displacement integration
+        eps_3d = np.zeros((nx, ny, 1, 3, 3))
+        eps_3d[:, :, 0, :2, :2] = eps
+        eps = eps_3d
+    else:
+        nx, ny, nz = eps.shape[:3]
     Nx, Ny, Nz = nx+1, ny+1, nz+1
 
     u = np.zeros((Nx,Ny,Nz,3))
@@ -142,7 +151,29 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         (nx, ny, nz, 4) softening properties field (SoA)
     """
 
-    nx, ny, nz = E.shape
+    # ---------------------------
+    # 0. Handle 2D -> 3D inflation
+    # ---------------------------
+    if eps.ndim == 4: # (nx, ny, 2, 2)
+        nx, ny = eps.shape[:2]
+        nz = 1
+        
+        # Inflate E, nu to (nx, ny, 1)
+        E = E.reshape(nx, ny, 1)
+        nu = nu.reshape(nx, ny, 1)
+        
+        # Inflate eps, sig to (nx, ny, 1, 3, 3)
+        eps_3d = np.zeros((nx, ny, 1, 3, 3))
+        sig_3d = np.zeros((nx, ny, 1, 3, 3))
+        eps_3d[:,:,0,:2,:2] = eps
+        sig_3d[:,:,0,:2,:2] = sig
+        
+        # If plane stress, we should ideally have eps_zz, but for simple 
+        # visualization we often just show the 2D components.
+        # If we have epsilon_plastic_field, we handle it below.
+        eps, sig = eps_3d, sig_3d
+    else:
+        nx, ny, nz = E.shape
 
     # ---------------------------
     # 2. Coordinates (nx+1, ny+1, nz+1)

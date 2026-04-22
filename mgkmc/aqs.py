@@ -398,7 +398,7 @@ class ThermalSimulation:
                   stress_targets={}, mixed_tol=1e-4, mixed_max_iter=50,
                   checkpoint_interval=None, checkpoint_path="checkpoint",  
                   stop_on_stress_drop=None, stress_drop_component=(0,1), stop_post_drop_steps=20,
-                  vtk_interval=None, vtk_mode="none", # "none", "elastic", "kmc", "all"
+                  vtk_interval="none", vtk_elastic_only=True, 
                   track_cascades=False,
                   enable_console_log=True,
                   summary_filename="summary_log.txt",
@@ -472,10 +472,17 @@ class ThermalSimulation:
             if enable_console_log:
                 print(summary_line.strip())
             
-            if vtk_interval and current_step % vtk_interval == 0:
-                if vtk_mode == "all" or (vtk_mode == "kmc" and step_type == "kmc") or (vtk_mode == "elastic" and step_type == "elastic"):
-                    vtk_fname = os.path.join(self.output_dir, f"vtk_step_{current_step:06d}.vtu")
-                    self.export_vtk(vtk_fname)
+            if vtk_interval is not None and vtk_interval not in ["none", "last"]:
+                save_vtk = False
+                if vtk_interval == "current":
+                    save_vtk = True
+                elif isinstance(vtk_interval, int) and current_step % vtk_interval == 0:
+                    save_vtk = True
+                
+                if save_vtk:
+                    if not vtk_elastic_only or step_type == "elastic":
+                        vtk_fname = os.path.join(self.output_dir, f"vtk_step_{current_step:06d}.vtu")
+                        self.export_vtk(vtk_fname)
 
             return curr_stress_val
 
@@ -483,7 +490,7 @@ class ThermalSimulation:
             tr_sig = np.trace(sigma_err)
             return (sigma_err - nu_avg * tr_sig * np.eye(3)) / E_avg
 
-        if vtk_mode != "none":
+        if vtk_interval != "none":
             self.export_vtk(os.path.join(self.output_dir, "vtk_step_000000.vtu"))
 
         strain_unit_tensor = np.zeros((3,3))
@@ -541,7 +548,7 @@ class ThermalSimulation:
                 if self.instability_mode == "cascade":
                     unstable_indices = find_unstable(self.Q, self.stability_threshold)
                     if len(unstable_indices) > 0:
-                        v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (vtk_mode == "all" and track_cascades) else None
+                        v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (not vtk_elastic_only and track_cascades) else None
                         l, f, _, _, truncated, stopped_by_eps = self._run_cascade(
                             step, vtk_prefix=v_pfx, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
                             eps_target=eps_target, component=component, log_callback=_cascade_log_callback
@@ -664,7 +671,7 @@ class ThermalSimulation:
             converged = False
             for it in range(mixed_max_iter):
                 if self.instability_mode == "cascade":
-                    v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (vtk_mode == "all" and track_cascades) else None
+                    v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (not vtk_elastic_only and track_cascades) else None
                     l, f, _, sig_M, truncated, stopped_by_eps = self._run_cascade(
                         step, vtk_prefix=v_pfx, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
                         eps_target=eps_target, component=component, log_callback=_cascade_log_callback
@@ -740,6 +747,11 @@ class ThermalSimulation:
                 if stop_countdown > 0: stop_countdown -= 1
                 else: break
             step += 1
+
+        if vtk_interval == "last":
+            self.export_vtk(os.path.join(self.output_dir, f"vtk_step_{step-1:06d}_final.vtu"))
+        elif vtk_interval not in [None, "none", "last"] and isinstance(vtk_interval, int) and (step-1) % vtk_interval != 0:
+            self.export_vtk(os.path.join(self.output_dir, f"vtk_step_{step-1:06d}_final.vtu"))
 
         if checkpoint_interval == "last": 
             self.save_checkpoint(f"{checkpoint_path}_final.h5", step=step-1)

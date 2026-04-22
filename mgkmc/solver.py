@@ -1,6 +1,7 @@
 import numpy as np
 from .elasticity import compute_lame_2d, stress_from_strain_2d, green_operator_2d, compute_lame_3d, stress_from_strain_3d, green_operator_3d
 from .fft import compute_wave_vectors_2d, compute_wave_vectors_3d, fft_field, ifft_field
+from .analysis.vtk import export_to_vtk
 import pyfftw.interfaces.numpy_fft as fft
 
 def spectral_solver_2d(E, nu, eps_bar, eps_plastic=None,
@@ -97,6 +98,8 @@ def linear_elastic_simulation_2d(
     global_log_path=None,
     driving_component=(0, 0),
     enable_console=True,
+    vtk_path=None,
+    vtk_interval="none",
     **solver_kw
 ):
     """
@@ -226,10 +229,26 @@ def linear_elastic_simulation_2d(
             if save_chk and cp_name:
                 save_checkpoint_2d(cp_name, s, E, nu, eps, sig, epsM, sigM, pixel)
 
+        if vtk_interval is not None and vtk_interval not in ["none", "last"]:
+            save_vtk, vt_name = False, None
+            if vtk_interval == "current":
+                vt_name = f"{vtk_path}.vtu"
+                save_vtk = True
+            elif isinstance(vtk_interval, int) and s % vtk_interval == 0:
+                vt_name = f"{vtk_path}_{s:06d}.vtu"
+                save_vtk = True
+            if save_vtk and vt_name:
+                export_to_vtk(vt_name, eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
+
     if chk_ival == "last":
         save_checkpoint_2d(f"{chk_path}_final.h5", n_steps, E, nu, eps, sig, epsM, sigM, pixel)
     elif chk_ival not in [None, "none", "last"] and isinstance(chk_ival, int) and n_steps % chk_ival != 0:
         save_checkpoint_2d(f"{chk_path}_final.h5", n_steps, E, nu, eps, sig, epsM, sigM, pixel)
+
+    if vtk_interval == "last":
+        export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
+    elif vtk_interval not in [None, "none", "last"] and isinstance(vtk_interval, int) and n_steps % vtk_interval != 0:
+        export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
 
     return (np.array(eps_macro_list),
             np.array(sig_macro_list),
@@ -354,6 +373,8 @@ def linear_elastic_simulation_3d(
     global_log_path=None,
     driving_component=(0, 0),
     enable_console=True,
+    vtk_path=None,
+    vtk_interval="none",
     **solver_kw
 ):
     """
@@ -490,10 +511,26 @@ def linear_elastic_simulation_3d(
             if save_chk and cp_name:
                 save_checkpoint_3d(cp_name, s, E, nu, eps, sig, epsM, sigM, pixel)
 
+        if vtk_interval is not None and vtk_interval not in ["none", "last"]:
+            save_vtk, vt_name = False, None
+            if vtk_interval == "current":
+                vt_name = f"{vtk_path}.vtu"
+                save_vtk = True
+            elif isinstance(vtk_interval, int) and s % vtk_interval == 0:
+                vt_name = f"{vtk_path}_{s:06d}.vtu"
+                save_vtk = True
+            if save_vtk and vt_name:
+                export_to_vtk(vt_name, eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
+
     if chk_ival == "last":
         save_checkpoint_3d(f"{chk_path}_final.h5", n_steps, E, nu, eps, sig, epsM, sigM, pixel)
     elif chk_ival not in [None, "none", "last"] and isinstance(chk_ival, int) and n_steps % chk_ival != 0:
         save_checkpoint_3d(f"{chk_path}_final.h5", n_steps, E, nu, eps, sig, epsM, sigM, pixel)
+
+    if vtk_interval == "last":
+        export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
+    elif vtk_interval not in [None, "none", "last"] and isinstance(vtk_interval, int) and n_steps % vtk_interval != 0:
+        export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
 
     if _log_f:  _log_f.close()
     if _glog_f: _glog_f.close()

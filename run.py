@@ -36,6 +36,17 @@ def main():
     # Apply Seed
     seed = config.get('seed', 42)
     np.random.seed(seed)
+
+    def parse_interval(val):
+        if val is None: return "none"
+        if isinstance(val, str):
+            if val.lower() in ["none", "current", "last"]:
+                return val.lower()
+            try:
+                return int(val)
+            except ValueError:
+                return val.lower()
+        return val
     
     simulation_type = config.get('simulation_type', 'kmc').lower()
     print(f"Loaded configuration from {config_path}")
@@ -188,10 +199,11 @@ def main():
                 if key[0] < 2 and key[1] < 2:
                     target_values[key] = val
                     target_strain_mask[key] = False
-                    
-            chk_val = out_conf.get('checkpoint_interval', 'none')
+            
+            chk_val      = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+            vtk_val      = parse_interval(out_conf.get('vtk_interval', 'none'))
             # mixed_tol is expressed in MPa in the config; solver works in Pa
-            tol_macro_pa    = float(bc_conf.get('mixed_tol', 1.0)) * 1e6
+            tol_macro_pa = float(bc_conf.get('mixed_tol', 1.0)) * 1e6
             log_path        = os.path.join(out_dir, 'summary_log.txt')
             global_log_path = os.path.join(out_dir, 'global_log.txt')
             enable_console  = bool(out_conf.get('enable_console', True))
@@ -210,7 +222,9 @@ def main():
                 driving_component=component,
                 enable_console=enable_console,
                 checkpoint_interval=chk_val,
-                checkpoint_path=os.path.join(out_dir, "checkpoint")
+                checkpoint_path=os.path.join(out_dir, "checkpoint"),
+                vtk_interval=vtk_val,
+                vtk_path=os.path.join(out_dir, "step")
             )
             
             print(f"2D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
@@ -230,7 +244,8 @@ def main():
                 target_values[key]      = val
                 target_strain_mask[key] = False
 
-            chk_val         = out_conf.get('checkpoint_interval', 'none')
+            chk_val      = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+            vtk_val      = parse_interval(out_conf.get('vtk_interval', 'none'))
             tol_macro_pa    = float(bc_conf.get('mixed_tol', 1.0)) * 1e6
             log_path        = os.path.join(out_dir, 'summary_log.txt')
             global_log_path = os.path.join(out_dir, 'global_log.txt')
@@ -250,7 +265,9 @@ def main():
                 driving_component=component,
                 enable_console=enable_console,
                 checkpoint_interval=chk_val,
-                checkpoint_path=os.path.join(out_dir, "checkpoint")
+                checkpoint_path=os.path.join(out_dir, "checkpoint"),
+                vtk_interval=vtk_val,
+                vtk_path=os.path.join(out_dir, "step")
             )
 
             print(f"3D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
@@ -269,9 +286,9 @@ def main():
         mixed_tol=float(bc_conf.get('mixed_tol', 1e-4)),
         
         # Output interval setups
-        vtk_interval=out_conf.get('vtk_interval', 10),
-        vtk_mode=out_conf.get('vtk_mode', 'none'),
-        checkpoint_interval=out_conf.get('checkpoint_interval', 'none'),
+        vtk_interval=parse_interval(out_conf.get('vtk_interval', 'none')),
+        vtk_elastic_only=out_conf.get('vtk_elastic_only', True),
+        checkpoint_interval=parse_interval(out_conf.get('checkpoint_interval', 'none')),
         checkpoint_elastic_only=out_conf.get('checkpoint_elastic_only', True),
         enable_save_q=out_conf.get('enable_save_q', False),
         save_q_interval=out_conf.get('save_q_interval', None),

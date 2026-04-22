@@ -140,8 +140,8 @@ output:
   enable_global_log: true
   enable_cascade_log: true
   enable_kmc_log: true
-  vtk_interval: 100               # How often to export VTK files
-  vtk_mode: "elastic"             # "none", "elastic", "kmc", "all"
+  vtk_interval: "none"          # "none", "current", "last", or an integer (e.g. 100)
+  vtk_elastic_only: true          # [NEW] If true, only save VTK on elastic steps
   track_cascades: false           # [NEW] Save micro-flip history in checkpoints
   enable_config_backup: true
 
