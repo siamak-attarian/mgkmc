@@ -65,7 +65,6 @@ def save_checkpoint(sim, filename):
         # Physics Parameters
         meta.attrs['temperature'] = sim.temperature
         meta.attrs['strain_rate'] = sim.strain_rate
-        meta.attrs['strain_rate_sensitivity'] = sim.strain_rate_sensitivity
         meta.attrs['stability_threshold'] = getattr(sim, 'stability_threshold', 0.0)
         
         # Loading configuration
@@ -252,8 +251,7 @@ def load_checkpoint(filename):
         
         # Load physics parameters (with defaults for old checkpoints)
         temperature = meta.attrs.get('temperature', 0.0)
-        strain_rate = meta.attrs.get('strain_rate', 1.0)
-        strain_rate_sensitivity = meta.attrs.get('strain_rate_sensitivity', 0.0)
+        strain_rate = meta.attrs.get('strain_rate', 1e7)
         stability_threshold = meta.attrs.get('stability_threshold', 0.0)
         
         current_step = meta.attrs['current_step']
@@ -299,7 +297,6 @@ def load_checkpoint(filename):
             solver_args=solver_args,
             temperature=temperature,
             strain_rate=strain_rate,
-            strain_rate_sensitivity=strain_rate_sensitivity,
             stability_threshold=stability_threshold
         )
         

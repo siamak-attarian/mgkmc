@@ -23,11 +23,9 @@ class ThermalSimulation:
                  softening_cap=2.0,
                  jp=10.0, jt=30.0,
                  neighbor_softening_fraction=0.0,
-                 tau=np.inf, # Transient decay time (Set to inf for no decay)
                  output_dir="output",
                  temperature=0.0, # Kelvin
                  strain_rate=1.0, # 1/s, used for KMC decision
-                 strain_rate_sensitivity=0.0, # 's' exponent
                  stability_threshold=0.0, # eV, threshold for athermal instability
                  redraw_directions=True, # Redraw all modes in voxel after flip
                  redraw_barriers=True,    # Redraw all Q0 in voxel after flip
@@ -56,10 +54,8 @@ class ThermalSimulation:
         self.jp = jp
         self.jt = jt
         self.neighbor_softening_fraction = neighbor_softening_fraction
-        self.tau = tau
         self.temperature = temperature
         self.strain_rate = strain_rate
-        self.strain_rate_sensitivity = strain_rate_sensitivity
         self.stability_threshold = stability_threshold
         self.redraw_directions = redraw_directions
         self.redraw_barriers = redraw_barriers
@@ -70,16 +66,15 @@ class ThermalSimulation:
         self.cascade_timing = cascade_timing
         self.scale_rate_by_volume = scale_rate_by_volume
 
-        # Dynamic calculation of tau if not provided
-        if self.temperature > 0 and (self.tau is None or self.tau == np.inf):
+        # Internal Physics Calculation: tau (Relaxation Time)
+        if self.temperature > 0:
             kB = 8.617e-5 # eV/K
             # tau = 1 / (nu0 * exp(-q_act_temp / (kB * T)))
             self.tau = 1.0 / (self.nu0 * np.exp(-self.q_act_temp / (kB * self.temperature)))
-            print(f"Calculated Dynamic Softening Decay Time Constant (tau): {self.tau:.4e} s")
-        elif self.tau == np.inf:
-            print("Softening Decay Time Constant (tau): Infinite (No decay)")
+            print(f" [ThermalSimulation] T={self.temperature}K > 0: Calculated Dynamic Softening Decay (tau): {self.tau:.4e} s")
         else:
-            print(f"Using Provided Softening Decay Time Constant (tau): {self.tau:.4e} s")
+            self.tau = np.inf
+            print(" [ThermalSimulation] T=0K: Softening Decay (tau): Infinite (No decay)")
         
         # Grid Setup (Arrays)
         self.grid_shape = (nx, ny, nz)
@@ -223,7 +218,7 @@ class ThermalSimulation:
             return not os.path.exists(path) or os.path.getsize(path) == 0
 
         if self._f_summary and (not append or is_empty(self.summary_log_path)):
-            summary_header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}\n"
+            summary_header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}\n"
             self._f_summary.write(summary_header)
             self._f_summary.write("-" * len(summary_header) + "\n")
 
@@ -394,10 +389,10 @@ class ThermalSimulation:
         sig_curr = self.sig_field.mean(axis=(0,1,2))
         return local_step, total_flips, eps_curr, sig_curr, False, False
 
-    def run_mixed(self, n_global_steps, strain_rate, component=(0,1), 
+    def run_simulation(self, n_global_steps, step_size, component=(0,1), 
                   stress_targets={}, mixed_tol=1e-4, mixed_max_iter=50,
                   checkpoint_interval=None, checkpoint_path="checkpoint",  
-                  stop_on_stress_drop=None, stress_drop_component=(0,1), stop_post_drop_steps=20,
+                  stop_on_stress_drop=None, stress_drop_component=None, stop_post_drop_steps=20,
                   vtk_interval="none", vtk_elastic_only=True, 
                   track_cascades=False,
                   enable_console_log=True,
@@ -418,6 +413,9 @@ class ThermalSimulation:
                   instability_mode="cascade", # "cascade" or "kmc"
                   cascade_timing="single"): # "single" or "per_flip"
         
+        if stress_drop_component is None:
+            stress_drop_component = component
+
         if not stress_targets:
             if component == (0,0):
                 stress_targets[(1,1)] = 0.0
@@ -435,7 +433,7 @@ class ThermalSimulation:
                         append=append_logs)
         
         if enable_console_log:
-            header = f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} {'Type':<10} {'Eps_xx':<12} {'Sig_xx(GPa)':<12} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}"
+            header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}"
             print(header)
             print("-" * len(header))
 
@@ -465,7 +463,7 @@ class ThermalSimulation:
             curr_stress_val, curr_strain_val = sig_curr[stress_drop_component], eps_curr[stress_drop_component]
             now, elapsed = datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time_total
             
-            summary_line = f"{now:<20} {elapsed:<12.2f} {current_step:<8d} {step_type.upper():<10} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<12.3f} {total_kmc_steps:<8d} {cascade_id:<8d} {cascade_flips:<8d} {self.time:<15.6e}\n"
+            summary_line = f"{now:<22} {elapsed:<12.2f} {current_step:<8d} {step_type.upper():<15} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<15.3f} {total_kmc_steps:<8d} {cascade_id:<8d} {cascade_flips:<8d} {self.time:<15.6e}\n"
             
             if self._f_summary:
                 self._f_summary.write(summary_line)
@@ -526,20 +524,20 @@ class ThermalSimulation:
         
         stress_history = [sig_curr[stress_drop_component]]
         
-        if checkpoint_interval is not None and checkpoint_mode in ["periodic", "current"]:
-            cp_name = f"{checkpoint_path}.h5" if checkpoint_mode == "current" else \
+        if checkpoint_interval is not None and checkpoint_interval not in ["none", "last"]:
+            cp_name = f"{checkpoint_path}.h5" if checkpoint_interval == "current" else \
                       (f"{checkpoint_path}_elastic_{elastic_chk_id:06d}.h5" if checkpoint_elastic_only else f"{checkpoint_path}_000000.h5")
             if checkpoint_elastic_only: elastic_chk_id += 1
             self.save_checkpoint(cp_name, step=0)
 
-        dt_elastic_increment = abs(strain_rate) / self.strain_rate if self.strain_rate > 0 else 1.0
+        dt_step = abs(step_size) / self.strain_rate if self.strain_rate > 0 else 1.0
         max_sequential_kmc = int(max_kmc_steps_pct * self.total_voxels)
         kmc_baseline_stress = None
         sequential_kmc_steps = 0
         remaining_time = 0.0
 
         while elastic_steps_done < n_global_steps:
-            remaining_time += dt_elastic_increment 
+            remaining_time += dt_step 
             
             while remaining_time > 0:
                 self.update_barriers()

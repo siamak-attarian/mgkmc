@@ -58,7 +58,6 @@ physics:
   jp: 20                          # [>0] Plastic-to-Softening coupling (dimensionless, typical: 10-50)
   jt: 20                          # [>0] Thermal-to-Softening coupling (dimensionless, typical: 10-50)
   neighbor_softening_fraction: 0.0 # [0.0-1.0] Fraction of softening applied to the 26 immediate neighbors
-  tau: .inf                       # [>0 or .inf] Transient softening decay time in seconds (use .inf for permanent softening)
   q_act_temp: 0.37                # [>0] Activation barrier for JT recovery (eV, typical: 0.3-0.5 eV)
   softening_cap: 0.916            # [>0] Max local barrier reduction (eV), e.g., -log(0.4) ~ 0.916
 
@@ -104,7 +103,6 @@ dynamics:
     patch_radius: 3          # Size of the truncated Kernel (radius 3 = 7x7x7 patch)
     sync_interval: 100       # Number of KMC events before the exact global FFT re-synchronizes the grid
   temperature: 300.0              # [>=0] Operating Temperature (K)
-  strain_rate_sensitivity: 0.0    # [>=0] 's' exponent for rate sensitivity (typically 0.0)
   physical_strain_rate: 1.0e7     # [>0] Physical macro strain rate (1/s)
   nu0: 1.0e13                     # [>0] Attempt frequency (Hz)
   instability_mode: "cascade"     # 'cascade' (collective instability solver) or 'kmc' (sequential solver)

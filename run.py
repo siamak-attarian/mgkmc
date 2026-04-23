@@ -19,7 +19,7 @@ import numpy as np
 
 # Add local path to ensure mgkmc is importable if run from source dir
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from mgkmc import ThermalSimulation
+from mgkmc import ThermalSimulation, KmcSimulation2D
 from mgkmc.microstructure import generate_field
 
 def main():
@@ -88,13 +88,53 @@ def main():
     phys_conf = config.get('physics', {})
     dyn_conf = config.get('dynamics', {})
     out_conf = config.get('output', {})
-    
-    print("Initializing ThermalSimulation environment...")
+    det_conf = config.get('detection', {})
+    bar_conf = config.get('barriers', {})
+    bar_type = bar_conf.get('type', 'gaussian')
+    bar_kwargs = bar_conf.get('kwargs', {})
     
     if simulation_type == "linear_elastic":
         sim = None
-        print(f"\n'linear_elastic' {dimensionality.upper()} mode selected. Skipping 3D ThermalSimulation initialization.")
+        print(f"\n'linear_elastic' {dimensionality.upper()} mode selected. Skipping KMC initialization.")
+    elif dimensionality == "2d":
+        print("Initializing KmcSimulation2D environment...")
+        sim = KmcSimulation2D(
+            nx, ny,
+            M=sys_conf['M'],
+            gamma0=sys_conf['gamma0'],
+            E_field=E_field,
+            nu_field=nu_field,
+            pixel=sys_conf.get('pixel', 1.0),
+            plane_mode=plane_mode,
+            barrier_generator=bar_type,
+            barrier_kwargs=bar_kwargs,
+            
+            # Physics Parameters
+            jp=phys_conf.get('jp', 20),
+            jt=phys_conf.get('jt', 20),
+            neighbor_softening_fraction=phys_conf.get('neighbor_softening_fraction', 0.0),
+            softening_scheme=phys_conf.get('softening_scheme', 'isotropic'),
+            softening_cap=phys_conf.get('softening_cap', 2.0),
+            q_act_temp=phys_conf.get('q_act_temp', 0.37),
+            redraw_directions=phys_conf.get('redraw_directions', True),
+            redraw_barriers=phys_conf.get('redraw_barriers', True),
+            # nu0, etc. handled below in Dynamics
+            
+            # Outputs
+            output_dir=out_conf.get('directory', 'output'),
+            
+            # Dynamics Parameters
+            temperature=float(dyn_conf.get('temperature', 0.0)),
+            strain_rate=float(dyn_conf.get('physical_strain_rate', 1.0e7)),
+            nu0=float(dyn_conf.get('nu0', 1.0e13)),
+            stability_threshold=phys_conf.get('stability_threshold', 0.0),
+            fast_patching=dyn_conf.get('fast_patching', None),
+            instability_mode=dyn_conf.get('instability_mode', 'cascade'),
+            cascade_timing=dyn_conf.get('cascade_timing', 'none'),
+            scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', False)
+        )
     else:
+        print("Initializing 3D ThermalSimulation environment...")
         sim = ThermalSimulation(
             nx, ny, nz,
             M=sys_conf['M'],
@@ -102,44 +142,47 @@ def main():
             E_field=E_field,
             nu_field=nu_field,
             pixel=sys_conf.get('pixel', 1.0),
+            barrier_generator=bar_type,
+            barrier_kwargs=bar_kwargs,
             
             # Physics Parameters
-        jp=phys_conf.get('jp', 20),
-        jt=phys_conf.get('jt', 20),
-        neighbor_softening_fraction=phys_conf.get('neighbor_softening_fraction', 0.0),
-        softening_scheme=phys_conf.get('softening_scheme', 'isotropic'),
-        softening_cap=phys_conf.get('softening_cap', 2.0),
-        tau=phys_conf.get('tau', np.inf),
-        q_act_temp=phys_conf.get('q_act_temp', 0.37),
-        stability_threshold=phys_conf.get('stability_threshold', 0.0),
-        redraw_directions=phys_conf.get('redraw_directions', True),
-        redraw_barriers=phys_conf.get('redraw_barriers', True),
-        
-        # Outputs
-        output_dir=out_conf.get('directory', 'output'),
-        
-        # Dynamics Parameters
-        temperature=float(dyn_conf.get('temperature', 0.0)),
-        strain_rate=float(dyn_conf.get('physical_strain_rate', 1.0e7)),
-        strain_rate_sensitivity=float(dyn_conf.get('strain_rate_sensitivity', 0.0)),
-        nu0=float(dyn_conf.get('nu0', 1.0e13)),
-        instability_mode=dyn_conf.get('instability_mode', 'cascade'),
-        cascade_timing=dyn_conf.get('cascade_timing', 'none'),
-        scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', True),
-        fast_patching=dyn_conf.get('fast_patching', None)
-    )
+            jp=phys_conf.get('jp', 20),
+            jt=phys_conf.get('jt', 20),
+            neighbor_softening_fraction=phys_conf.get('neighbor_softening_fraction', 0.0),
+            softening_scheme=phys_conf.get('softening_scheme', 'isotropic'),
+            softening_cap=phys_conf.get('softening_cap', 2.0),
+            q_act_temp=phys_conf.get('q_act_temp', 0.37),
+            stability_threshold=phys_conf.get('stability_threshold', 0.0),
+            redraw_directions=phys_conf.get('redraw_directions', True),
+            redraw_barriers=phys_conf.get('redraw_barriers', True),
+            
+            # Outputs
+            output_dir=out_conf.get('directory', 'output'),
+            
+            # Dynamics Parameters
+            temperature=float(dyn_conf.get('temperature', 0.0)),
+            strain_rate=float(dyn_conf.get('physical_strain_rate', 1.0e7)),
+            nu0=float(dyn_conf.get('nu0', 1.0e13)),
+            instability_mode=dyn_conf.get('instability_mode', 'cascade'),
+            cascade_timing=dyn_conf.get('cascade_timing', 'none'),
+            scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', True),
+            fast_patching=dyn_conf.get('fast_patching', None)
+        )
 
     # ---------------------------------------------------------
     # 4. Prepare Boundary Conditions & Run
     # ---------------------------------------------------------
     bc_conf = config['boundary_conditions']
     
-    comp_map = {
-        'xx': (0, 0), 'yy': (1, 1), 'zz': (2, 2),
-        'xy': (0, 1), 'yx': (1, 0),
-        'xz': (0, 2), 'zx': (2, 0),
-        'yz': (1, 2), 'zy': (2, 1)
-    }
+    if dimensionality == "2d":
+        comp_map = {'xx': (0, 0), 'yy': (1, 1), 'xy': (0, 1), 'yx': (1, 0)}
+    else:
+        comp_map = {
+            'xx': (0, 0), 'yy': (1, 1), 'zz': (2, 2),
+            'xy': (0, 1), 'yx': (1, 0),
+            'xz': (0, 2), 'zx': (2, 0),
+            'yz': (1, 2), 'zy': (2, 1)
+        }
     # Reverse map: tuple -> label string
     comp_label = {v: k for k, v in comp_map.items()}
 
@@ -152,7 +195,7 @@ def main():
         parts = c_str.split()
         if len(parts) == 2:
             return (int(parts[0]), int(parts[1]))
-        return (0, 0)
+        return None
 
     driving_raw = bc_conf.get('driving_component', 'xx')
     component = parse_comp(driving_raw)
@@ -160,7 +203,8 @@ def main():
     stress_targets = {}
     for k_str, val in bc_conf.get('mixed_targets', {}).items():
         k_tup = parse_comp(k_str)
-        stress_targets[k_tup] = float(val)
+        if k_tup is not None:
+            stress_targets[k_tup] = float(val) * 1e9 if float(val) < 1e6 else float(val)
             
     print(f"\n--- Starting execution ---")
     print(f"Grid: {nx}x{ny}x{nz if dimensionality=='3d' else ''} ({dimensionality.upper()})")
@@ -278,9 +322,9 @@ def main():
         n_global_eval = calculated_n_steps
         
     # Execute mixed loading for 3D AQS/KMC
-    sim.run_mixed(
+    sim.run_simulation(
         n_global_steps=n_global_eval,
-        strain_rate=float(dyn_conf.get('physical_strain_rate', 1e7)),
+        step_size=step_size,
         component=component,
         stress_targets=stress_targets,
         mixed_tol=float(bc_conf.get('mixed_tol', 1e-4)),
@@ -300,7 +344,8 @@ def main():
         enable_global_log=out_conf.get('enable_global_log', True),
         enable_cascade_log=out_conf.get('enable_cascade_log', True),
         enable_kmc_log=out_conf.get('enable_kmc_log', True),
-        track_cascades=out_conf.get('track_cascades', False)
+        track_cascades=out_conf.get('track_cascades', False),
+        max_kmc_steps_pct=det_conf.get('max_kmc_steps_pct', 0.3)
     )
     
     # If the user requested pure linear_elastic analysis, we halt here.
