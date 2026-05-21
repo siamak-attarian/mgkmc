@@ -474,11 +474,18 @@ class ThermalSimulation:
                 save_vtk = False
                 if vtk_interval == "current":
                     save_vtk = True
-                elif isinstance(vtk_interval, int) and current_step % vtk_interval == 0:
-                    save_vtk = True
+                elif isinstance(vtk_interval, int):
+                    if vtk_elastic_only:
+                        # Count only elastic increments
+                        if step_type.lower() in ["elastic", "init"] and elastic_steps_done % vtk_interval == 0:
+                            save_vtk = True
+                    else:
+                        # Count global steps (includes KMC/Cascade events)
+                        if current_step % vtk_interval == 0:
+                            save_vtk = True
                 
                 if save_vtk:
-                    if not vtk_elastic_only or step_type == "elastic":
+                    if not vtk_elastic_only or step_type.lower() in ["elastic", "init"]:
                         vtk_fname = os.path.join(self.output_dir, f"vtk_step_{current_step:06d}.vtu")
                         self.export_vtk(vtk_fname)
 
@@ -488,7 +495,8 @@ class ThermalSimulation:
             tr_sig = np.trace(sigma_err)
             return (sigma_err - nu_avg * tr_sig * np.eye(3)) / E_avg
 
-        if vtk_interval != "none":
+        if vtk_interval != "none" and vtk_interval != "last":
+            # Step 0 is always considered an elastic/initial state
             self.export_vtk(os.path.join(self.output_dir, "vtk_step_000000.vtu"))
 
         strain_unit_tensor = np.zeros((3,3))

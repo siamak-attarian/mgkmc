@@ -304,8 +304,23 @@ class KmcSimulation2D:
                     print("-" * len(header))
                 print(summary_line.strip())
 
-            if vtk_interval != "none" and s % (vtk_interval if isinstance(vtk_interval, int) else 1) == 0:
-                export_to_vtk(os.path.join(self.output_dir, f"step_{s:05d}.vtu"), self.eps_field, self.sig_field, self.E_field, self.nu_field, pixel=self.pixel)
+            if vtk_interval is not None and vtk_interval not in ["none", "last"]:
+                save_vtk = False
+                if vtk_interval == "current":
+                    save_vtk = True
+                elif isinstance(vtk_interval, int):
+                    if vtk_elastic_only:
+                        # Count only elastic increments
+                        if s_type.upper() in ["ELAST", "INIT"] and elastic_steps_done % vtk_interval == 0:
+                            save_vtk = True
+                    else:
+                        # Count global steps (includes KMC/Cascade events)
+                        if s % vtk_interval == 0:
+                            save_vtk = True
+                
+                if save_vtk:
+                    if not vtk_elastic_only or s_type.upper() in ["ELAST", "INIT"]:
+                        export_to_vtk(os.path.join(self.output_dir, f"step_{s:05d}.vtu"), self.eps_field, self.sig_field, self.E_field, self.nu_field, pixel=self.pixel)
 
         self.elastic_run(self.eps_macro)
         _do_logging(0, "INIT", 0, 0)
