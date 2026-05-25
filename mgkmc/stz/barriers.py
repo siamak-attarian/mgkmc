@@ -75,10 +75,10 @@ def compute_barrier(Q_field, Q0_field, sigma_field, catalog, volume,
                          norm_prev = np.sqrt(norm_prev_sq)
                          norm_mode = np.sqrt(norm_mode_sq)
                          
-                         if norm_prev < 1e-12:
+                         if norm_prev < 1e-12 or norm_mode < 1e-12:
                              modifier = 1.0
                          else:
-                             cos_theta = dot_prod / (norm_mode * norm_prev + 1e-12)
+                             cos_theta = dot_prod / (norm_mode * norm_prev)
                              # Restored Formula
                              modifier = (1.0 + cos_theta)**2 / 4.0
                     else:

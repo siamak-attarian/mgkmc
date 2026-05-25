@@ -330,11 +330,12 @@ class ThermalSimulation:
                 flipped_voxels_in_batch.add(voxel_id)
                 flipped_indices.append((ux, uy, uz, um))
                 
+                C = self.catalog[ux,uy,uz,um].copy()
                 apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
                                self.catalog, ux, uy, uz, um, self.time, 
                                self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                 
-                self.prev_strain_dir[ux,uy,uz] = self.catalog[ux,uy,uz,um]
+                self.prev_strain_dir[ux,uy,uz] = C
                 
                 if self.redraw_directions or self.redraw_barriers:
                     if self.redraw_directions:
