@@ -48,9 +48,11 @@ def main():
                 return val.lower()
         return val
     
-    simulation_type = config.get('simulation_type', 'kmc').lower()
+    simulation_type   = config.get('simulation_type', 'kmc').lower()
+    strain_assumption = config.get('system', {}).get('strain_assumption', 'small_strain').lower()
     print(f"Loaded configuration from {config_path}")
     print(f"Simulation Type selected: '{simulation_type}'")
+    print(f"Strain Assumption: '{strain_assumption}'")
     
     # ---------------------------------------------------------
     # 2. Extract System & Material Properties
@@ -259,65 +261,103 @@ def main():
     
     if simulation_type == "linear_elastic":
         if dimensionality == "2d":
-            from mgkmc.linear_elastic_simulator import linear_elastic_simulation_2d
-            out_dir = out_conf.get('directory', 'output')
+            out_dir        = out_conf.get('directory', 'output')
             os.makedirs(out_dir, exist_ok=True)
-            
-            # By default, components not mentioned are fixed rigidly (strain = 0)
-            target_strain_mask = np.ones((2,2), dtype=bool)
-            target_values = np.zeros((2,2))
-            
-            target_strain_mask[component] = True
-            target_values[component] = eps_target
-            
-            for key, val in stress_targets.items():
-                if key[0] < 2 and key[1] < 2:
-                    target_values[key] = val
-                    target_strain_mask[key] = False
-            
-            chk_val      = parse_interval(out_conf.get('checkpoint_interval', 'none'))
-            vtk_val      = parse_interval(out_conf.get('vtk_interval', 'none'))
-            # mixed_tol is expressed in MPa in the config; solver works in Pa
-            tol_macro_pa = float(bc_conf.get('mixed_tol', 1.0)) * 1e6
-            log_path        = os.path.join(out_dir, 'summary_log.txt')
-            global_log_path = os.path.join(out_dir, 'global_log.txt')
-            enable_console  = bool(out_conf.get('enable_console', True))
-            print(f"\nRunning 2D Mixed Solver ({plane_mode}) for {calculated_n_steps} steps...")
-            eps_mac_list, sig_mac_list, eps_list, sig_list = linear_elastic_simulation_2d(
-                E=E_field, nu=nu_field,
-                target_strain_mask=target_strain_mask,
-                target_values=target_values,
-                n_steps=calculated_n_steps,
-                pixel=sys_conf['pixel'],
-                plane_mode=plane_mode,
-                store=True,
-                tol_macro=tol_macro_pa,
-                log_path=log_path,
-                global_log_path=global_log_path,
-                driving_component=component,
-                enable_console=enable_console,
-                checkpoint_interval=chk_val,
-                checkpoint_path=os.path.join(out_dir, "checkpoint"),
-                vtk_interval=vtk_val,
-                vtk_path=os.path.join(out_dir, "step")
-            )
-            
-            print(f"2D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
-            return
+            tol_macro_pa   = float(bc_conf.get('mixed_tol', 1.0)) * 1e6
+            log_path       = os.path.join(out_dir, 'summary_log.txt')
+            global_log_path= os.path.join(out_dir, 'global_log.txt')
+            enable_console = bool(out_conf.get('enable_console', True))
+
+            # ------------------------------------------------------------------
+            # Route by strain_assumption
+            # ------------------------------------------------------------------
+            if strain_assumption == 'finite_strain':
+                from mgkmc.finite_strain_simulator import finite_strain_simulation_2d
+
+                # Convert mixed_targets to dict {(i,j): Pa}
+                fs_mixed = {}
+                for key, val in stress_targets.items():
+                    if key[0] < 2 and key[1] < 2:
+                        fs_mixed[key] = float(val)
+
+                # Read interval configurations
+                chk_val = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+                vtk_val = parse_interval(out_conf.get('vtk_interval', 'none'))
+
+                print(f"\nRunning 2D Finite-Strain Newton-CG Solver ({plane_mode}) "
+                      f"for {calculated_n_steps} steps...")
+
+                F_mac_arr, Sig_mac_arr, P_mac_arr, F_list, Sig_list = \
+                    finite_strain_simulation_2d(
+                        E=E_field,
+                        nu=nu_field,
+                        driving_component=component,
+                        eps_target=eps_target,
+                        n_steps=calculated_n_steps,
+                        mixed_targets=fs_mixed,
+                        plane_mode=plane_mode,
+                        pixel=sys_conf.get('pixel', 1.0),
+                        tol_macro=tol_macro_pa,
+                        store=True,
+                        log_path=log_path,
+                        global_log_path=global_log_path,
+                        enable_console=enable_console,
+                        checkpoint_interval=chk_val,
+                        checkpoint_path=os.path.join(out_dir, 'checkpoint'),
+                        vtk_interval=vtk_val,
+                        vtk_path=os.path.join(out_dir, 'step')
+                    )
+
+                print(f"2D Finite-Strain simulation completed. "
+                      f"Logs written to {out_dir}.")
+                return
+
+            else:
+                # ---- Original small-strain path (unchanged) ----
+                from mgkmc.linear_elastic_simulator import linear_elastic_simulation_2d
+
+                target_strain_mask = np.ones((2, 2), dtype=bool)
+                target_values      = np.zeros((2, 2))
+
+                target_strain_mask[component] = True
+                target_values[component]      = eps_target
+
+                for key, val in stress_targets.items():
+                    if key[0] < 2 and key[1] < 2:
+                        target_values[key]      = val
+                        target_strain_mask[key] = False
+
+                chk_val = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+                vtk_val = parse_interval(out_conf.get('vtk_interval', 'none'))
+
+                print(f"\nRunning 2D Small-Strain Mixed Solver ({plane_mode}) "
+                      f"for {calculated_n_steps} steps...")
+                eps_mac_list, sig_mac_list, eps_list, sig_list = \
+                    linear_elastic_simulation_2d(
+                        E=E_field, nu=nu_field,
+                        target_strain_mask=target_strain_mask,
+                        target_values=target_values,
+                        n_steps=calculated_n_steps,
+                        pixel=sys_conf['pixel'],
+                        plane_mode=plane_mode,
+                        store=True,
+                        tol_macro=tol_macro_pa,
+                        log_path=log_path,
+                        global_log_path=global_log_path,
+                        driving_component=component,
+                        enable_console=enable_console,
+                        checkpoint_interval=chk_val,
+                        checkpoint_path=os.path.join(out_dir, 'checkpoint'),
+                        vtk_interval=vtk_val,
+                        vtk_path=os.path.join(out_dir, 'step')
+                    )
+
+                print(f"2D Elastic simulation completed. "
+                      f"Data output to checkpoints in {out_dir}.")
+                return
         elif dimensionality == "3d":
-            from mgkmc.linear_elastic_simulator import linear_elastic_simulation_3d
             out_dir = out_conf.get('directory', 'output')
             os.makedirs(out_dir, exist_ok=True)
-
-            target_strain_mask = np.ones((3, 3), dtype=bool)
-            target_values      = np.zeros((3, 3))
-
-            target_strain_mask[component] = True
-            target_values[component]      = eps_target
-
-            for key, val in stress_targets.items():
-                target_values[key]      = val
-                target_strain_mask[key] = False
 
             chk_val      = parse_interval(out_conf.get('checkpoint_interval', 'none'))
             vtk_val      = parse_interval(out_conf.get('vtk_interval', 'none'))
@@ -326,27 +366,68 @@ def main():
             global_log_path = os.path.join(out_dir, 'global_log.txt')
             enable_console  = bool(out_conf.get('enable_console', True))
 
-            print(f"\nRunning 3D Linear Elastic Solver for {calculated_n_steps} steps...")
-            eps_mac_list, sig_mac_list, eps_list, sig_list = linear_elastic_simulation_3d(
-                E=E_field, nu=nu_field,
-                target_strain_mask=target_strain_mask,
-                target_values=target_values,
-                n_steps=calculated_n_steps,
-                pixel=sys_conf['pixel'],
-                store=True,
-                tol_macro=tol_macro_pa,
-                log_path=log_path,
-                global_log_path=global_log_path,
-                driving_component=component,
-                enable_console=enable_console,
-                checkpoint_interval=chk_val,
-                checkpoint_path=os.path.join(out_dir, "checkpoint"),
-                vtk_interval=vtk_val,
-                vtk_path=os.path.join(out_dir, "step")
-            )
+            if strain_assumption == 'finite_strain':
+                from mgkmc.finite_strain_simulator import finite_strain_simulation_3d
 
-            print(f"3D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
-            return
+                # Convert mixed targets to dict {(i,j): Pa}
+                fs_mixed = {key: float(val) for key, val in stress_targets.items()}
+
+                print(f"\nRunning 3D Finite-Strain Newton-CG Solver for {calculated_n_steps} steps...")
+                F_mac_arr, Sig_mac_arr, P_mac_arr, F_list, Sig_list = \
+                    finite_strain_simulation_3d(
+                        E=E_field, nu=nu_field,
+                        driving_component=component,
+                        eps_target=eps_target,
+                        n_steps=calculated_n_steps,
+                        mixed_targets=fs_mixed,
+                        pixel=sys_conf.get('pixel', 1.0),
+                        tol_macro=tol_macro_pa,
+                        store=True,
+                        log_path=log_path,
+                        global_log_path=global_log_path,
+                        enable_console=enable_console,
+                        checkpoint_interval=chk_val,
+                        checkpoint_path=os.path.join(out_dir, 'checkpoint'),
+                        vtk_interval=vtk_val,
+                        vtk_path=os.path.join(out_dir, 'step')
+                    )
+
+                print(f"3D Finite-Strain simulation completed. Logs written to {out_dir}.")
+                return
+            else:
+                from mgkmc.linear_elastic_simulator import linear_elastic_simulation_3d
+
+                target_strain_mask = np.ones((3, 3), dtype=bool)
+                target_values      = np.zeros((3, 3))
+
+                target_strain_mask[component] = True
+                target_values[component]      = eps_target
+
+                for key, val in stress_targets.items():
+                    target_values[key]      = val
+                    target_strain_mask[key] = False
+
+                print(f"\nRunning 3D Linear Elastic Solver for {calculated_n_steps} steps...")
+                eps_mac_list, sig_mac_list, eps_list, sig_list = linear_elastic_simulation_3d(
+                    E=E_field, nu=nu_field,
+                    target_strain_mask=target_strain_mask,
+                    target_values=target_values,
+                    n_steps=calculated_n_steps,
+                    pixel=sys_conf['pixel'],
+                    store=True,
+                    tol_macro=tol_macro_pa,
+                    log_path=log_path,
+                    global_log_path=global_log_path,
+                    driving_component=component,
+                    enable_console=enable_console,
+                    checkpoint_interval=chk_val,
+                    checkpoint_path=os.path.join(out_dir, "checkpoint"),
+                    vtk_interval=vtk_val,
+                    vtk_path=os.path.join(out_dir, "step")
+                )
+
+                print(f"3D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
+                return
         else:
             n_global_eval = 0
     else:

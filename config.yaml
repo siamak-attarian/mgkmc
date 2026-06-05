@@ -13,6 +13,7 @@ simulation_type: "kmc"
 system:
   dimensionality: "3d" # Options: "2d" or "3d"
   plane_mode: "plane_strain" # Options: "plane_strain" or "plane_stress" (ignored if not 2d)
+  strain_assumption: "small_strain" # Options: "small_strain" or "finite_strain" (linear_elastic 2d only)
   nx: 128
   ny: 128
   nz: 1
