@@ -35,7 +35,10 @@ class ThermalSimulation:
                  instability_mode="cascade", # "cascade" or "kmc"
                  cascade_timing="none",      # "none", "single", or "per_flip"
                  scale_rate_by_volume=True,
-                 fast_patching=None
+                 fast_patching=None,
+                 enable_thermal=False, Cp=420.0, rho=6125.0,
+                 thermal_diffusivity=3.0e-6, thermal_coords="pixel",
+                 temperature_cap=1000.0, thermostat=False, tau_bath=0.0
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -65,6 +68,25 @@ class ThermalSimulation:
         self.instability_mode = instability_mode
         self.cascade_timing = cascade_timing
         self.scale_rate_by_volume = scale_rate_by_volume
+
+        # Thermal parameters
+        self.enable_thermal = enable_thermal
+        self.Cp = Cp
+        self.rho = rho
+        self.thermal_diffusivity = thermal_diffusivity
+        self.thermal_coords = thermal_coords.lower()
+        self.temperature_cap = temperature_cap
+        self.thermostat = thermostat
+        self.tau_bath = tau_bath
+        self.Tlocal = np.full((nx, ny, nz), float(self.temperature), dtype=np.float64)
+
+        from .fft import compute_wave_vectors_3d
+        Lx, Ly, Lz = (nx, ny, nz) if self.thermal_coords == "pixel" else (nx * pixel, ny * pixel, nz * pixel)
+        kx, ky, kz = compute_wave_vectors_3d(nx, ny, nz, Lx, Ly, Lz)
+        self.k2 = kx**2 + ky**2 + kz**2
+        self.diffusivity_scaled = self.thermal_diffusivity
+        if self.thermal_coords == "physical":
+            self.diffusivity_scaled *= 1e18 # Convert m^2/s to nm^2/s
 
         # Internal Physics Calculation: tau (Relaxation Time)
         if self.temperature > 0:
@@ -191,7 +213,8 @@ class ThermalSimulation:
         from mgkmc.analysis import export_to_vtk
         export_to_vtk(filename, self.eps_field, self.sig_field, self.E, self.nu, 
                       pixel=self.pixel, eps_plastic_field=self.eps_plastic, 
-                      soft_prop_field=self.soft_prop, match_matplotlib_orientation=True)
+                      soft_prop_field=self.soft_prop, match_matplotlib_orientation=True,
+                      Tlocal=self.Tlocal if self.enable_thermal else None)
 
     def _init_logs(self, summary_filename="summary_log.txt", 
                    enable_summary_log=True, enable_global_log=True, 
@@ -218,7 +241,10 @@ class ThermalSimulation:
             return not os.path.exists(path) or os.path.getsize(path) == 0
 
         if self._f_summary and (not append or is_empty(self.summary_log_path)):
-            summary_header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}\n"
+            summary_header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}"
+            if self.enable_thermal:
+                summary_header += " T_avg(K)"
+            summary_header += "\n"
             self._f_summary.write(summary_header)
             self._f_summary.write("-" * len(summary_header) + "\n")
 
@@ -299,6 +325,24 @@ class ThermalSimulation:
                         self.prev_strain_dir, self.softening_cap,
                         scheme, self.tau)
 
+    def heat_conducting_3d(self, dt):
+        """Solve 3D heat equation in Fourier space."""
+        if not self.enable_thermal or dt <= 0:
+            return
+        from .fft import fft_field, ifft_field
+        T_hat = fft_field(self.Tlocal)
+        T_hat *= np.exp(-self.k2 * self.diffusivity_scaled * dt)
+        self.Tlocal = ifft_field(T_hat)
+        
+        if self.thermostat:
+            if self.tau_bath > 0:
+                self.Tlocal = self.temperature + (self.Tlocal - self.temperature) * np.exp(-dt / self.tau_bath)
+            else:
+                self.Tlocal = self.Tlocal - (np.mean(self.Tlocal) - self.temperature)
+
+        if self.temperature_cap > 0:
+            self.Tlocal = np.clip(self.Tlocal, a_min=None, a_max=self.temperature_cap)
+
     def _run_cascade(self, global_step, vtk_prefix=None, track_cascades=False, strain_unit_tensor=None, eps_target=None, component=(0,0), log_callback=None):
         local_step = 0
         total_flips = 0
@@ -337,6 +381,13 @@ class ThermalSimulation:
                 
                 self.prev_strain_dir[ux,uy,uz] = C
                 
+                if self.enable_thermal:
+                    DeltaHeat = np.sum(self.sig_field[ux, uy, uz] * C)
+                    delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                    self.Tlocal[ux, uy, uz] += delta_T
+                    if self.temperature_cap > 0:
+                        self.Tlocal[ux, uy, uz] = min(self.Tlocal[ux, uy, uz], self.temperature_cap)
+
                 if self.redraw_directions or self.redraw_barriers:
                     if self.redraw_directions:
                         self.catalog[ux,uy,uz] = stz_catalog_glass(self.M, self.gamma0)
@@ -360,6 +411,7 @@ class ThermalSimulation:
             
             if dt_cascade > 0:
                 self.time += dt_cascade
+                self.heat_conducting_3d(dt_cascade)
                 if strain_unit_tensor is not None:
                     self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
 
@@ -435,6 +487,8 @@ class ThermalSimulation:
         
         if enable_console_log:
             header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}"
+            if self.enable_thermal:
+                header += " T_avg(K)"
             print(header)
             print("-" * len(header))
 
@@ -464,7 +518,11 @@ class ThermalSimulation:
             curr_stress_val, curr_strain_val = sig_curr[stress_drop_component], eps_curr[stress_drop_component]
             now, elapsed = datetime.now().strftime("%Y-%m-%d %H:%M:%S"), time.time() - start_time_total
             
-            summary_line = f"{now:<22} {elapsed:<12.2f} {current_step:<8d} {step_type.upper():<15} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<15.3f} {total_kmc_steps:<8d} {cascade_id:<8d} {cascade_flips:<8d} {self.time:<15.6e}\n"
+            summary_line = f"{now:<22} {elapsed:<12.2f} {current_step:<8d} {step_type.upper():<15} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<15.3f} {total_kmc_steps:<8d} {cascade_id:<8d} {cascade_flips:<8d} {self.time:<15.6e}"
+            if self.enable_thermal:
+                avg_T = np.mean(self.Tlocal)
+                summary_line += f" {avg_T:<15.2f}"
+            summary_line += "\n"
             
             if self._f_summary:
                 self._f_summary.write(summary_line)
@@ -574,7 +632,7 @@ class ThermalSimulation:
                 # SHARED: Rate calculation
                 # In 'kmc' mode, compute_rates will include Q <= 0
                 eff_volume = self.volume if self.scale_rate_by_volume else 1.0
-                rates_flat, indices_flat, total_rate = compute_rates(self.Q, eff_volume, self.temperature, self.nu0, instability_mode=self.instability_mode)
+                rates_flat, indices_flat, total_rate = compute_rates(self.Q, eff_volume, self.Tlocal if self.enable_thermal else self.temperature, self.nu0, instability_mode=self.instability_mode)
                 
                 if total_rate > 0:
                     u = np.random.uniform()
@@ -582,6 +640,7 @@ class ThermalSimulation:
                     
                     if t_wait < remaining_time:
                         self.time += t_wait
+                        self.heat_conducting_3d(t_wait)
                         self.eps_macro += strain_unit_tensor * (self.strain_rate * t_wait)
                         remaining_time -= t_wait
 
@@ -596,6 +655,13 @@ class ThermalSimulation:
                         apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
                                        self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                         self.prev_strain_dir[x,y,z] = C
+                        
+                        if self.enable_thermal:
+                            DeltaHeat = np.sum(self.sig_field[x, y, z] * C)
+                            delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                            self.Tlocal[x, y, z] += delta_T
+                            if self.temperature_cap > 0:
+                                self.Tlocal[x, y, z] = min(self.Tlocal[x, y, z], self.temperature_cap)
                         
                         if self.redraw_directions or self.redraw_barriers:
                             if self.redraw_directions: self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
@@ -661,11 +727,13 @@ class ThermalSimulation:
                     else:
                         d_eps = strain_unit_tensor * (self.strain_rate * remaining_time)
                         self.eps_macro += d_eps
+                        self.heat_conducting_3d(remaining_time)
                         self.time += remaining_time
                         remaining_time = 0
                 else:
                     d_eps = strain_unit_tensor * (self.strain_rate * remaining_time)
                     self.eps_macro += d_eps
+                    self.heat_conducting_3d(remaining_time)
                     self.time += remaining_time
                     remaining_time = 0
                     
@@ -802,11 +870,20 @@ class ThermalSimulation:
                     meta.attrs['softening_cap'] = self.softening_cap
                     meta.attrs['softening_scheme'] = self.softening_scheme
                     meta.attrs['scale_rate_by_volume'] = self.scale_rate_by_volume
+                    meta.attrs['enable_thermal'] = self.enable_thermal
+                    meta.attrs['Cp'] = self.Cp
+                    meta.attrs['thermostat'] = self.thermostat
+                    meta.attrs['tau_bath'] = self.tau_bath
+                    meta.attrs['rho'] = self.rho
+                    meta.attrs['thermal_diffusivity'] = self.thermal_diffusivity
+                    meta.attrs['thermal_coords'] = self.thermal_coords
+                    meta.attrs['temperature_cap'] = self.temperature_cap
                     fields = f.create_group('fields')
                     fields.create_dataset('eps_field', data=self.eps_field, compression='gzip')
                     fields.create_dataset('sig_field', data=self.sig_field, compression='gzip')
                     fields.create_dataset('E_field', data=self.E_field, compression='gzip')
                     fields.create_dataset('nu_field', data=self.nu_field, compression='gzip')
+                    fields.create_dataset('Tlocal', data=self.Tlocal, compression='gzip')
                     grid = f.create_group('grid')
                     grid.create_dataset('eps_plastic', data=self.eps_plastic, compression='gzip')
                     grid.create_dataset('soft_prop', data=self.soft_prop, compression='gzip')
@@ -841,17 +918,34 @@ class ThermalSimulation:
             E_field = fields['E_field'][:]
             nu_field = fields['nu_field'][:]
             
+            enable_thermal = meta.attrs.get('enable_thermal', False)
+            Cp = meta.attrs.get('Cp', 420.0)
+            rho = meta.attrs.get('rho', 6125.0)
+            thermal_diffusivity = meta.attrs.get('thermal_diffusivity', 3.0e-6)
+            thermal_coords = meta.attrs.get('thermal_coords', "pixel")
+            temperature_cap = meta.attrs.get('temperature_cap', 1000.0)
+            thermostat = meta.attrs.get('thermostat', False)
+            tau_bath = meta.attrs.get('tau_bath', 0.0)
+
             sim = cls(nx, ny, nz, M=M, gamma0=gamma0, E_field=E_field, nu_field=nu_field, 
                       pixel=pixel, temperature=meta.attrs['temperature'], 
                       strain_rate=meta.attrs['strain_rate'], jp=meta.attrs['jp'], jt=meta.attrs['jt'],
                       neighbor_softening_fraction=meta.attrs.get('neighbor_softening_fraction', 0.0),
                       softening_cap=meta.attrs['softening_cap'], softening_scheme=meta.attrs['softening_scheme'],
                       nu0=meta.attrs.get('nu0', 1e13), q_act_temp=meta.attrs.get('q_act_temp', 0.37),
-                      scale_rate_by_volume=meta.attrs.get('scale_rate_by_volume', True))
+                      scale_rate_by_volume=meta.attrs.get('scale_rate_by_volume', True),
+                      enable_thermal=enable_thermal, Cp=Cp, rho=rho,
+                      thermal_diffusivity=thermal_diffusivity, thermal_coords=thermal_coords,
+                      temperature_cap=temperature_cap, thermostat=thermostat,
+                      tau_bath=tau_bath)
             
             sim.time = meta.attrs.get('sim_time', 0.0)
             sim.eps_field = fields['eps_field'][:]
             sim.sig_field = fields['sig_field'][:]
+            if 'Tlocal' in fields:
+                sim.Tlocal = fields['Tlocal'][:]
+            else:
+                sim.Tlocal = np.full((nx, ny, nz), float(sim.temperature), dtype=np.float64)
             
             grid = f['grid']
             sim.eps_plastic = grid['eps_plastic'][:]

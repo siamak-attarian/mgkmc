@@ -121,7 +121,8 @@ def reconstruct_displacement_element_centered(eps, pixel=1.0):
 def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
                   grid=None, include_plastic=True,
                   match_matplotlib_orientation=False,
-                  eps_plastic_field=None, soft_prop_field=None):
+                  eps_plastic_field=None, soft_prop_field=None,
+                  Tlocal=None):
     """
     Export voxel-based FFT results to VTK.
 
@@ -259,6 +260,9 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         "sig_vm"  : [sig_vm.ravel(order="C")],
         "eps_vm"  : [eps_vm.ravel(order="C")],
     }
+    
+    if Tlocal is not None:
+        cell_data["temperature"] = [Tlocal.ravel(order="C")]
     
     # ---------------------------
     # Add plastic strain and softening data

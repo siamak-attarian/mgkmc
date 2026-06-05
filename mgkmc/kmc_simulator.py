@@ -18,7 +18,10 @@ class KmcSimulation2D:
                  plane_mode="plane_strain", fast_patching=None,
                  instability_mode="cascade", cascade_timing="none", 
                  scale_rate_by_volume=True,
-                 redraw_directions=True, redraw_barriers=True):
+                 redraw_directions=True, redraw_barriers=True,
+                 enable_thermal=False, Cp=420.0, rho=6125.0,
+                 thermal_diffusivity=3.0e-6, thermal_coords="pixel",
+                 temperature_cap=1000.0, thermostat=False, tau_bath=0.0):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
@@ -36,6 +39,25 @@ class KmcSimulation2D:
         self.nu0 = nu0
         self.q_act_temp = q_act_temp
         self.plane_mode = plane_mode
+        
+        # Thermal parameters
+        self.enable_thermal = enable_thermal
+        self.Cp = Cp
+        self.rho = rho
+        self.thermal_diffusivity = thermal_diffusivity
+        self.thermal_coords = thermal_coords.lower()
+        self.temperature_cap = temperature_cap
+        self.thermostat = thermostat
+        self.tau_bath = tau_bath
+        self.Tlocal = np.full((nx, ny), float(self.temperature), dtype=np.float64)
+
+        from .fft import compute_wave_vectors_2d
+        Lx, Ly = (nx, ny) if self.thermal_coords == "pixel" else (nx * pixel, ny * pixel)
+        kx, ky = compute_wave_vectors_2d(nx, ny, Lx, Ly)
+        self.k2 = kx**2 + ky**2
+        self.diffusivity_scaled = self.thermal_diffusivity
+        if self.thermal_coords == "physical":
+            self.diffusivity_scaled *= 1e18 # Convert m^2/s to nm^2/s
         
         # Fast Patching Flags
         self.fast_patching_enabled = fast_patching.get('enabled', False) if fast_patching else False
@@ -116,7 +138,10 @@ class KmcSimulation2D:
         if enable_summary_log:
             self._f_summary = open(self.summary_log_path, mode, buffering=1)
             if not append or is_empty(self.summary_log_path):
-                header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}\n"
+                header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}"
+                if self.enable_thermal:
+                    header += " T_avg(K)"
+                header += "\n"
                 self._f_summary.write(header)
                 self._f_summary.write("-" * len(header) + "\n")
 
@@ -204,6 +229,24 @@ class KmcSimulation2D:
             self.softening_cap, scheme_idx, self.tau
         )
 
+    def heat_conducting_2d(self, dt):
+        """Solve 2D heat equation in Fourier space."""
+        if not self.enable_thermal or dt <= 0:
+            return
+        from .fft import fft_field, ifft_field
+        T_hat = fft_field(self.Tlocal)
+        T_hat *= np.exp(-self.k2 * self.diffusivity_scaled * dt)
+        self.Tlocal = ifft_field(T_hat)
+        
+        if self.thermostat:
+            if self.tau_bath > 0:
+                self.Tlocal = self.temperature + (self.Tlocal - self.temperature) * np.exp(-dt / self.tau_bath)
+            else:
+                self.Tlocal = self.Tlocal - (np.mean(self.Tlocal) - self.temperature)
+
+        if self.temperature_cap > 0:
+            self.Tlocal = np.clip(self.Tlocal, a_min=None, a_max=self.temperature_cap)
+
     def _run_cascade(self, step, component=(0,0), log_callback=None):
         total_flips = 0
         local_step = 0
@@ -233,6 +276,13 @@ class KmcSimulation2D:
                 C = self.catalog[x,y,m].copy()
                 apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                 self.prev_strain_dir[x,y] = C
+                
+                if self.enable_thermal:
+                    DeltaHeat = np.sum(self.sig_field[x, y] * C)
+                    delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                    self.Tlocal[x, y] += delta_T
+                    if self.temperature_cap > 0:
+                        self.Tlocal[x, y] = min(self.Tlocal[x, y], self.temperature_cap)
                 
                 # Redraw catalog/barriers after flip
                 if self.redraw_directions or self.redraw_barriers:
@@ -293,13 +343,19 @@ class KmcSimulation2D:
             curr_strain_val = epsM[component]
             curr_stress_val = sigM[component]
             
-            summary_line = f"{now:<22} {elapsed:<12.2f} {s:<8d} {s_type.upper():<15} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<15.3f} {total_kmc_steps:<8d} {c_id:<8d} {c_flips:<8d} {self.time:<15.6e}\n"
+            summary_line = f"{now:<22} {elapsed:<12.2f} {s:<8d} {s_type.upper():<15} {curr_strain_val:<12.6f} {curr_stress_val/1e9:<15.3f} {total_kmc_steps:<8d} {c_id:<8d} {c_flips:<8d} {self.time:<15.6e}"
+            if self.enable_thermal:
+                avg_T = np.mean(self.Tlocal)
+                summary_line += f" {avg_T:<15.2f}"
+            summary_line += "\n"
             
             if self._f_summary:
                 self._f_summary.write(summary_line)
             if enable_console_log:
                 if s == 0: # Print header on first call if console enabled
                     header = f"{'Timestamp':<22} {'Elapsed(s)':<12} {'Step':<8} {'Type':<15} {'Eps_xx':<12} {'Sig_xx(GPa)':<15} {'KMC':<8} {'Cascade':<8} {'Flips':<8} {'SimTime(s)':<15}"
+                    if self.enable_thermal:
+                        header += " T_avg(K)"
                     print(header)
                     print("-" * len(header))
                 print(summary_line.strip())
@@ -320,7 +376,7 @@ class KmcSimulation2D:
                 
                 if save_vtk:
                     if not vtk_elastic_only or s_type.upper() in ["ELAST", "INIT"]:
-                        export_to_vtk(os.path.join(self.output_dir, f"step_{s:05d}.vtu"), self.eps_field, self.sig_field, self.E_field, self.nu_field, pixel=self.pixel)
+                        export_to_vtk(os.path.join(self.output_dir, f"step_{s:05d}.vtu"), self.eps_field, self.sig_field, self.E_field, self.nu_field, pixel=self.pixel, Tlocal=self.Tlocal if self.enable_thermal else None)
 
         self.elastic_run(self.eps_macro)
         _do_logging(0, "INIT", 0, 0)
@@ -343,11 +399,12 @@ class KmcSimulation2D:
                         continue
 
                 eff_volume = self.volume if self.scale_rate_by_volume else 1.0
-                rates, indices, total_rate = compute_rates_2d(self.Q, eff_volume, self.temperature, self.nu0, instability_mode=self.instability_mode)
+                rates, indices, total_rate = compute_rates_2d(self.Q, eff_volume, self.Tlocal if self.enable_thermal else self.temperature, self.nu0, instability_mode=self.instability_mode)
                 if total_rate > 0:
                     t_wait = -np.log(np.random.rand()) / total_rate
                     if t_wait < remaining_time:
                         self.time += t_wait
+                        self.heat_conducting_2d(t_wait)
                         self.eps_macro += strain_unit * (self.strain_rate * t_wait)
                         remaining_time -= t_wait
                         idx_flat = indices[select_event_2d(rates, total_rate)]
@@ -358,6 +415,13 @@ class KmcSimulation2D:
                         
                         apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                         self.prev_strain_dir[x,y] = C
+                        
+                        if self.enable_thermal:
+                            DeltaHeat = np.sum(self.sig_field[x, y] * C)
+                            delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                            self.Tlocal[x, y] += delta_T
+                            if self.temperature_cap > 0:
+                                self.Tlocal[x, y] = min(self.Tlocal[x, y], self.temperature_cap)
                         
                         # Redraw catalog/barriers after flip (per paper Section 2.1.2)
                         if self.redraw_directions or self.redraw_barriers:
@@ -417,6 +481,7 @@ class KmcSimulation2D:
                         self.sig_field += self.sigma_macro_unit * (self.strain_rate * remaining_time)
                 
                 self.eps_macro += strain_unit * (self.strain_rate * remaining_time)
+                self.heat_conducting_2d(remaining_time)
                 self.time += remaining_time
                 remaining_time = 0
             

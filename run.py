@@ -93,6 +93,17 @@ def main():
     bar_type = bar_conf.get('type', 'gaussian')
     bar_kwargs = bar_conf.get('kwargs', {})
     
+    # Parse Thermal config
+    therm_conf = config.get('thermal', {})
+    enable_thermal = therm_conf.get('enable_thermal', False)
+    Cp = therm_conf.get('Cp', 420.0)
+    rho = therm_conf.get('rho', 6125.0)
+    thermal_diffusivity = therm_conf.get('thermal_diffusivity', 3.0e-6)
+    thermal_coords = therm_conf.get('thermal_coords', 'pixel')
+    temperature_cap = therm_conf.get('temperature_cap', 1000.0)
+    thermostat = therm_conf.get('thermostat', False)
+    tau_bath = therm_conf.get('tau_bath', 0.0)
+
     if simulation_type == "linear_elastic":
         sim = None
         print(f"\n'linear_elastic' {dimensionality.upper()} mode selected. Skipping KMC initialization.")
@@ -131,7 +142,17 @@ def main():
             fast_patching=dyn_conf.get('fast_patching', None),
             instability_mode=dyn_conf.get('instability_mode', 'cascade'),
             cascade_timing=dyn_conf.get('cascade_timing', 'none'),
-            scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', False)
+            scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', False),
+            
+            # Thermal Parameters
+            enable_thermal=enable_thermal,
+            Cp=Cp,
+            rho=rho,
+            thermal_diffusivity=thermal_diffusivity,
+            thermal_coords=thermal_coords,
+            temperature_cap=temperature_cap,
+            thermostat=thermostat,
+            tau_bath=tau_bath
         )
     else:
         print("Initializing 3D ThermalSimulation environment...")
@@ -166,7 +187,17 @@ def main():
             instability_mode=dyn_conf.get('instability_mode', 'cascade'),
             cascade_timing=dyn_conf.get('cascade_timing', 'none'),
             scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', True),
-            fast_patching=dyn_conf.get('fast_patching', None)
+            fast_patching=dyn_conf.get('fast_patching', None),
+            
+            # Thermal Parameters
+            enable_thermal=enable_thermal,
+            Cp=Cp,
+            rho=rho,
+            thermal_diffusivity=thermal_diffusivity,
+            thermal_coords=thermal_coords,
+            temperature_cap=temperature_cap,
+            thermostat=thermostat,
+            tau_bath=tau_bath
         )
 
     # ---------------------------------------------------------

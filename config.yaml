@@ -109,6 +109,18 @@ dynamics:
   cascade_timing: "none"          # 'none', 'single' (1/nu0 advance per iteration), or 'per_flip' (N/nu0 advance)
   scale_rate_by_volume: true      # Toggle whether to multiply activation rates by voxel volume
 
+# Thermal Coupling & Conduction
+thermal:
+  enable_thermal: false         # Set to true to enable local heating and diffusion
+  Cp: 420.0                     # Specific heat capacity [J/(kg K)]
+  rho: 6125.0                   # Material density [kg/m^3]
+  thermal_diffusivity: 3.0e-6   # Thermal diffusivity [m^2/s]
+  thermal_coords: "pixel"       # "pixel" (dimensionless) or "physical" (scaled by voxel size)
+  temperature_cap: 1000.0       # Maximum allowed local temperature (K) to prevent unphysical spikes
+  thermostat: false             # Set to true to control average temperature
+  tau_bath: 0.0                 # Relaxation time constant (0.0 for hard rescaling to ambient temperature)
+
+
 # Loading
 loading:
   eps_target: 0.14                # [>0] Target global macroscopic strain

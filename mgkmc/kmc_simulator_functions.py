@@ -2,14 +2,24 @@ import numpy as np
 from numba import jit
 from scipy.stats import rayleigh
 
-@jit(nopython=True, cache=True)
 def compute_rates_2d(Q_field, volume, temperature, nu0=1e13, instability_mode="cascade"):
     """
-    Compute KMC rates for all modes using Numba (2D version).
+    Compute KMC rates for all modes (2D version).
+    """
+    nx, ny, M = Q_field.shape
+    if isinstance(temperature, (int, float, np.number)):
+        temperature_arr = np.full((nx, ny), float(temperature))
+    else:
+        temperature_arr = np.asarray(temperature, dtype=np.float64)
+    return _compute_rates_2d_jit(Q_field, volume, temperature_arr, nu0, instability_mode)
+
+@jit(nopython=True, cache=True)
+def _compute_rates_2d_jit(Q_field, volume, temperature_arr, nu0=1e13, instability_mode="cascade"):
+    """
+    JIT core for computing KMC rates with local temperature array.
     """
     nx, ny, M = Q_field.shape
     kB = 8.617e-5
-    beta = 1.0 / (kB * temperature) if temperature > 0 else np.inf
     
     count = 0
     for x in range(nx):
@@ -26,6 +36,8 @@ def compute_rates_2d(Q_field, volume, temperature, nu0=1e13, instability_mode="c
     total_rate = 0.0
     for x in range(nx):
         for y in range(ny):
+            T = temperature_arr[x, y]
+            beta = 1.0 / (kB * T) if T > 0.0 else np.inf
             for m in range(M):
                 q = Q_field[x,y,m]
                 include = (instability_mode == "kmc" or q > 0)
@@ -40,7 +52,7 @@ def compute_rates_2d(Q_field, volume, temperature, nu0=1e13, instability_mode="c
                     total_rate += r
                     indices[k] = (x * ny + y) * M + m
                     k += 1
-                          
+                           
     return rates, indices, total_rate
 
 @jit(nopython=True, cache=True)

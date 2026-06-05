@@ -1,21 +1,24 @@
 import numpy as np
 from numba import jit
 
-@jit(nopython=True, cache=True)
 def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="cascade"):
     """
-    Compute KMC rates for all modes using Numba.
-    Returns:
-       rates_flat: 1D array of all valid rates
-       indices_flat: 1D array of encoded indices
-       total_rate: sum of all rates
+    Compute KMC rates for all modes (3D version).
+    """
+    nx, ny, nz, M = Q_field.shape
+    if isinstance(temperature, (int, float, np.number)):
+        temperature_arr = np.full((nx, ny, nz), float(temperature))
+    else:
+        temperature_arr = np.asarray(temperature, dtype=np.float64)
+    return _compute_rates_jit(Q_field, volume, temperature_arr, nu0, instability_mode)
+
+@jit(nopython=True, cache=True)
+def _compute_rates_jit(Q_field, volume, temperature_arr, nu0=1e13, instability_mode="cascade"):
+    """
+    JIT core for computing KMC rates with local temperature array (3D).
     """
     nx, ny, nz, M = Q_field.shape
     kB = 8.617e-5
-    beta = 1.0 / (kB * temperature) if temperature > 0 else np.inf
-    
-    # We'll return everything and let selection handle zeros?
-    # No, selection needs compact array.
     
     # Pass 1: Count valid events
     count = 0
@@ -34,9 +37,6 @@ def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="casc
     
     # Pass 2: Fill
     rates = np.empty(count, dtype=np.float64)
-    # We need to map back to (x,y,z,m). 
-    # Storing 4 ints per event is expensive? 
-    # Use encoded index: idx = ((x*ny + y)*nz + z)*M + m
     indices = np.empty(count, dtype=np.int64)
     
     k = 0
@@ -45,6 +45,8 @@ def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="casc
     for x in range(nx):
         for y in range(ny):
              for z in range(nz):
+                 T = temperature_arr[x, y, z]
+                 beta = 1.0 / (kB * T) if T > 0.0 else np.inf
                  for m in range(M):
                      q = Q_field[x,y,z,m]
                      
@@ -68,7 +70,7 @@ def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="casc
                          # Encode index
                          indices[k] = ((x * ny + y) * nz + z) * M + m
                          k += 1
-                         
+                          
     return rates, indices, total_rate
 
 @jit(nopython=True, cache=True)
