@@ -152,20 +152,14 @@ def build_ghat4_2d(nx, ny, Lx, Ly, even_grid=False):
     ----------
     nx, ny     : grid dimensions
     Lx, Ly     : physical cell size (same units as pixel size)
-    even_grid  : if True, Nyquist frequencies are also zeroed
-                 (recovers compatibility of F for even-sized grids)
+    even_grid  : ignored, parity is determined automatically per axis
     """
     ndim = 2
 
     # Centered frequency axes (cycles, not angular)
-    # Even grid: -nx/2 ... nx/2-1
-    # Odd grid: -(nx-1)/2 ... (nx-1)/2
-    if even_grid:
-        fx = np.arange(-nx / 2., nx / 2.)
-        fy = np.arange(-ny / 2., ny / 2.)
-    else:
-        fx = np.arange(-(nx - 1) / 2., (nx + 1) / 2.)
-        fy = np.arange(-(ny - 1) / 2., (ny + 1) / 2.)
+    # Determine parity for each axis independently
+    fx = np.arange(-nx / 2., nx / 2.) if nx % 2 == 0 else np.arange(-(nx - 1) / 2., (nx + 1) / 2.)
+    fy = np.arange(-ny / 2., ny / 2.) if ny % 2 == 0 else np.arange(-(ny - 1) / 2., (ny + 1) / 2.)
 
     # Scaled frequencies ξ_i = q_i / L_i  → shapes (nx,) and (ny,)
     xi_x = fx / Lx
@@ -176,11 +170,12 @@ def build_ghat4_2d(nx, ny, Lx, Ly, even_grid=False):
     xi  = np.stack([Xi_x, Xi_y], axis=0)                    # (2, nx, ny)
     xi2 = Xi_x**2 + Xi_y**2                                 # (nx, ny)
 
-    # Nyquist mask for even grids: zero out where frequency is -N/2 (index 0)
-    if even_grid:
-        nyquist_mask = (Xi_x == -nx / (2. * Lx)) | (Xi_y == -ny / (2. * Ly))
-    else:
-        nyquist_mask = np.zeros((nx, ny), dtype=bool)
+    # Nyquist mask for even axes: zero out where frequency is -N/2 (index 0)
+    nyquist_mask = np.zeros((nx, ny), dtype=bool)
+    if nx % 2 == 0:
+        nyquist_mask |= (Xi_x == -nx / (2. * Lx))
+    if ny % 2 == 0:
+        nyquist_mask |= (Xi_y == -ny / (2. * Ly))
 
     safe_xi2 = xi2.copy()
     safe_xi2[xi2 == 0] = 1.0  # avoid divide-by-zero at q=0
@@ -195,9 +190,8 @@ def build_ghat4_2d(nx, ny, Lx, Ly, even_grid=False):
                     val = delta[i, m] * xi[j] * xi[l] / safe_xi2
                     # Zero at DC frequency  (q = 0)
                     val[xi2 == 0] = 0.0
-                    # Zero at Nyquist frequencies for even grids
-                    if even_grid:
-                        val[nyquist_mask] = 0.0
+                    # Zero at Nyquist frequencies
+                    val[nyquist_mask] = 0.0
                     Ghat4[i, j, l, m] = val
 
     return Ghat4
@@ -357,14 +351,11 @@ def build_ghat4_3d(nx, ny, nz, Lx, Ly, Lz, even_grid=False):
     """
     ndim = 3
 
-    if even_grid:
-        fx = np.arange(-nx / 2., nx / 2.)
-        fy = np.arange(-ny / 2., ny / 2.)
-        fz = np.arange(-nz / 2., nz / 2.)
-    else:
-        fx = np.arange(-(nx - 1) / 2., (nx + 1) / 2.)
-        fy = np.arange(-(ny - 1) / 2., (ny + 1) / 2.)
-        fz = np.arange(-(nz - 1) / 2., (nz + 1) / 2.)
+    # Centered frequency axes (cycles, not angular)
+    # Determine parity for each axis independently
+    fx = np.arange(-nx / 2., nx / 2.) if nx % 2 == 0 else np.arange(-(nx - 1) / 2., (nx + 1) / 2.)
+    fy = np.arange(-ny / 2., ny / 2.) if ny % 2 == 0 else np.arange(-(ny - 1) / 2., (ny + 1) / 2.)
+    fz = np.arange(-nz / 2., nz / 2.) if nz % 2 == 0 else np.arange(-(nz - 1) / 2., (nz + 1) / 2.)
 
     xi_x = fx / Lx
     xi_y = fy / Ly
@@ -374,10 +365,14 @@ def build_ghat4_3d(nx, ny, nz, Lx, Ly, Lz, even_grid=False):
     xi  = np.stack([Xi_x, Xi_y, Xi_z], axis=0)
     xi2 = Xi_x**2 + Xi_y**2 + Xi_z**2
 
-    if even_grid:
-        nyquist_mask = (Xi_x == -nx / (2. * Lx)) | (Xi_y == -ny / (2. * Ly)) | (Xi_z == -nz / (2. * Lz))
-    else:
-        nyquist_mask = np.zeros((nx, ny, nz), dtype=bool)
+    # Nyquist mask for even axes: zero out where frequency is -N/2 (index 0)
+    nyquist_mask = np.zeros((nx, ny, nz), dtype=bool)
+    if nx % 2 == 0:
+        nyquist_mask |= (Xi_x == -nx / (2. * Lx))
+    if ny % 2 == 0:
+        nyquist_mask |= (Xi_y == -ny / (2. * Ly))
+    if nz % 2 == 0:
+        nyquist_mask |= (Xi_z == -nz / (2. * Lz))
 
     safe_xi2 = xi2.copy()
     safe_xi2[xi2 == 0] = 1.0
@@ -391,8 +386,7 @@ def build_ghat4_3d(nx, ny, nz, Lx, Ly, Lz, even_grid=False):
                 for m in range(ndim):
                     val = delta[i, m] * xi[j] * xi[l] / safe_xi2
                     val[xi2 == 0] = 0.0
-                    if even_grid:
-                        val[nyquist_mask] = 0.0
+                    val[nyquist_mask] = 0.0
                     Ghat4[i, j, l, m] = val
 
     return Ghat4
