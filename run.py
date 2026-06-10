@@ -33,6 +33,14 @@ def main():
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
         
+    # Apply pyfftw thread limit globally
+    try:
+        import pyfftw
+        num_threads = config.get('system', {}).get('num_threads', 1)
+        pyfftw.config.NUM_THREADS = int(num_threads)
+    except Exception as e:
+        print(f" [run.py] Warning: could not set pyfftw threads: {e}")
+        
     # Apply Seed
     seed = config.get('seed', 42)
     np.random.seed(seed)
@@ -154,7 +162,8 @@ def main():
             thermal_coords=thermal_coords,
             temperature_cap=temperature_cap,
             thermostat=thermostat,
-            tau_bath=tau_bath
+            tau_bath=tau_bath,
+            strain_assumption=strain_assumption
         )
     else:
         print("Initializing 3D ThermalSimulation environment...")
@@ -199,7 +208,8 @@ def main():
             thermal_coords=thermal_coords,
             temperature_cap=temperature_cap,
             thermostat=thermostat,
-            tau_bath=tau_bath
+            tau_bath=tau_bath,
+            strain_assumption=strain_assumption
         )
 
     # ---------------------------------------------------------

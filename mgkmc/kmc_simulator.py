@@ -21,7 +21,8 @@ class KmcSimulation2D:
                  redraw_directions=True, redraw_barriers=True,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
-                 temperature_cap=1000.0, thermostat=False, tau_bath=0.0):
+                 temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
+                 strain_assumption="small_strain"):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
@@ -120,6 +121,19 @@ class KmcSimulation2D:
         self.prev_strain_dir = np.zeros((nx, ny, 2, 2))
         self.solver_args = {}
 
+        self.strain_assumption = strain_assumption
+        if self.strain_assumption == "finite_strain":
+            self.fast_patching_enabled = False
+            from .finite_strain_simulator import _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d
+            self.I2_fs, self.I4_fs, self.I4rt_fs, self.I4s_fs, self.II_fs = _make_identity_tensors_2d(nx, ny)
+            Lx, Ly = nx * pixel, ny * pixel
+            self.Ghat4_fs = build_ghat4_2d(nx, ny, Lx, Ly, even_grid=(nx%2==0 or ny%2==0))
+            self.C4_fs = build_C4_2d(self.E_field, self.nu_field, self.I4s_fs, self.II_fs, plane_mode=self.plane_mode)
+            
+            self.F_field = np.einsum('ij,xy->xyij', np.eye(2), np.ones((nx, ny)))
+            self.F_plastic = np.einsum('ij,xy->xyij', np.eye(2), np.ones((nx, ny)))
+            self.F_macro = np.eye(2)
+
         if self.fast_patching_enabled:
             self._precompute_patch_kernels(self.E_field)
         
@@ -214,12 +228,49 @@ class KmcSimulation2D:
         print(" [KmcSimulation2D] Fast Patching Kernels Ready.")
 
     def elastic_run(self, eps_macro):
-        """Standard 2D elastic equilibrium step."""
-        self.eps_field, self.sig_field, _, _ = spectral_solver_2d(
-            self.E_field, self.nu_field, eps_macro, eps_plastic=self.eps_plastic,
-            pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
-        )
-        return self.sig_field.mean(axis=(0,1))
+        """Standard 2D elastic equilibrium step, supporting both small and finite strain."""
+        if getattr(self, "strain_assumption", "small_strain") == "finite_strain":
+            from .finite_strain_simulator import build_finite_strain_bc, finite_strain_solver_step_2d
+            drv_comp = getattr(self, "driving_component", (0, 0))
+            stress_tgts = getattr(self, "stress_targets", {})
+            eps_s = eps_macro[drv_comp]
+            
+            F_bar, F_mask, P_tgt, P_mask = build_finite_strain_bc(
+                drv_comp, eps_s, stress_tgts, self.plane_mode
+            )
+            
+            F_in = np.einsum('xyij->ijxy', self.F_field)
+            Fp_in = np.einsum('xyij->ijxy', self.F_plastic)
+            
+            F_out, P_out, Sig_out, K4_out, F_bar_updated = finite_strain_solver_step_2d(
+                F_in, F_bar, self.Ghat4_fs, self.C4_fs, self.I2_fs, self.I4_fs, self.I4rt_fs, Fp=Fp_in,
+                driving_component=drv_comp, P_target=P_tgt, P_mask=P_mask,
+                E_avg=self.E_field.mean(), nu_avg=self.nu_field.mean(),
+                enable_console=False
+            )
+            
+            self.F_field = np.einsum('ijxy->xyij', F_out)
+            self.sig_field = np.einsum('ijxy->xyij', Sig_out)
+            
+            from .finite_strain_simulator import _dot22, _trans2
+            E_GL = 0.5 * (_dot22(_trans2(F_out), F_out) - self.I2_fs)
+            self.eps_field = np.einsum('ijxy->xyij', E_GL)
+            
+            self.F_macro = F_bar_updated
+            for ii in range(2):
+                for jj in range(2):
+                    if ii == jj:
+                        self.eps_macro[ii, jj] = self.F_macro[ii, jj] - 1.0
+                    else:
+                        self.eps_macro[ii, jj] = self.F_macro[ii, jj]
+            
+            return self.sig_field.mean(axis=(0,1))
+        else:
+            self.eps_field, self.sig_field, _, _ = spectral_solver_2d(
+                self.E_field, self.nu_field, eps_macro, eps_plastic=self.eps_plastic,
+                pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
+            )
+            return self.sig_field.mean(axis=(0,1))
 
     def update_barriers(self):
         scheme_idx = 1 if self.softening_scheme == "directional" else 0
@@ -274,7 +325,33 @@ class KmcSimulation2D:
                 flips_in_this_batch += 1
                 
                 C = self.catalog[x,y,m].copy()
-                apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
+                if self.strain_assumption == "finite_strain":
+                    I_plus_C = np.eye(2) + C
+                    det_I_plus_C = I_plus_C[0,0] * I_plus_C[1,1] - I_plus_C[0,1] * I_plus_C[1,0]
+                    I_plus_C = I_plus_C / np.sqrt(max(1e-12, det_I_plus_C))
+                    self.F_plastic[x, y] = np.dot(I_plus_C, self.F_plastic[x, y])
+                    
+                    # Update softening locally
+                    e11, e22, e12 = C[0,0], C[1,1], C[0,1]
+                    sum_sq = (e12**2) + (e22**2 + e11**2 + (e11 - e22)**2) / 6.0
+                    gp_new = self.soft_prop[x,y,0] + self.jp * sum_sq
+                    if self.softening_cap > 0 and gp_new > self.softening_cap: gp_new = self.softening_cap
+                    self.soft_prop[x,y,0] = gp_new
+                    self.soft_prop[x,y,1] = self.jt * sum_sq
+                    self.last_event_time[x,y] = self.time
+                    
+                    if self.neighbor_softening_fraction > 0.0:
+                        nx, ny = self.nx, self.ny
+                        for dx in (-1, 0, 1):
+                            for dy in (-1, 0, 1):
+                                if dx == 0 and dy == 0: continue
+                                nx_n, ny_n = (x + dx + nx) % nx, (y + dy + ny) % ny
+                                gp_n = self.soft_prop[nx_n, ny_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
+                                if self.softening_cap > 0 and gp_n > self.softening_cap: gp_n = self.softening_cap
+                                self.soft_prop[nx_n, ny_n, 0] = gp_n
+                                self.soft_prop[nx_n, ny_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+                else:
+                    apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                 self.prev_strain_dir[x,y] = C
                 
                 if self.enable_thermal:
@@ -328,6 +405,9 @@ class KmcSimulation2D:
                   track_cascades=False, enable_console_log=True,
                   summary_filename="summary_log.txt", enable_summary_log=True,
                   enable_global_log=True, max_kmc_steps_pct=0.3, **kwargs):
+        
+        self.driving_component = component
+        self.stress_targets = stress_targets
         
         self._init_logs(summary_filename, enable_summary_log, enable_global_log)
         start_time_total = time.time()
@@ -412,8 +492,32 @@ class KmcSimulation2D:
                         
                         is_instab = self.Q[x,y,m] <= self.stability_threshold
                         C = self.catalog[x,y,m].copy()
-                        
-                        apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
+                        if self.strain_assumption == "finite_strain":
+                            I_plus_C = np.eye(2) + C
+                            det_I_plus_C = I_plus_C[0,0] * I_plus_C[1,1] - I_plus_C[0,1] * I_plus_C[1,0]
+                            I_plus_C = I_plus_C / np.sqrt(max(1e-12, det_I_plus_C))
+                            self.F_plastic[x, y] = np.dot(I_plus_C, self.F_plastic[x, y])
+                            
+                            e11, e22, e12 = C[0,0], C[1,1], C[0,1]
+                            sum_sq = (e12**2) + (e22**2 + e11**2 + (e11 - e22)**2) / 6.0
+                            gp_new = self.soft_prop[x,y,0] + self.jp * sum_sq
+                            if self.softening_cap > 0 and gp_new > self.softening_cap: gp_new = self.softening_cap
+                            self.soft_prop[x,y,0] = gp_new
+                            self.soft_prop[x,y,1] = self.jt * sum_sq
+                            self.last_event_time[x,y] = self.time
+                            
+                            if self.neighbor_softening_fraction > 0.0:
+                                nx, ny = self.nx, self.ny
+                                for dx in (-1, 0, 1):
+                                    for dy in (-1, 0, 1):
+                                        if dx == 0 and dy == 0: continue
+                                        nx_n, ny_n = (x + dx + nx) % nx, (y + dy + ny) % ny
+                                        gp_n = self.soft_prop[nx_n, ny_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
+                                        if self.softening_cap > 0 and gp_n > self.softening_cap: gp_n = self.softening_cap
+                                        self.soft_prop[nx_n, ny_n, 0] = gp_n
+                                        self.soft_prop[nx_n, ny_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+                        else:
+                            apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                         self.prev_strain_dir[x,y] = C
                         
                         if self.enable_thermal:
@@ -485,15 +589,18 @@ class KmcSimulation2D:
                 self.time += remaining_time
                 remaining_time = 0
             
-            for it in range(mixed_max_iter):
-                sigM = self.elastic_run(self.eps_macro)
-                err_max = 0.0
-                for idx, target in stress_targets.items():
-                    if idx[0] < 2 and idx[1] < 2:
-                        err = target - sigM[idx]
-                        err_max = max(err_max, abs(err))
-                        self.eps_macro[idx] += err / self.E_field.mean()
-                if err_max < mixed_tol: break
+            if self.strain_assumption == "finite_strain":
+                self.elastic_run(self.eps_macro)
+            else:
+                for it in range(mixed_max_iter):
+                    sigM = self.elastic_run(self.eps_macro)
+                    err_max = 0.0
+                    for idx, target in stress_targets.items():
+                        if idx[0] < 2 and idx[1] < 2:
+                            err = target - sigM[idx]
+                            err_max = max(err_max, abs(err))
+                            self.eps_macro[idx] += err / self.E_field.mean()
+                    if err_max < mixed_tol: break
             
             elastic_steps_done += 1
             _do_logging(step, "ELAST", cascade_event_count, 0)

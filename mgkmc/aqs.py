@@ -38,7 +38,8 @@ class ThermalSimulation:
                  fast_patching=None,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
-                 temperature_cap=1000.0, thermostat=False, tau_bath=0.0
+                 temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
+                 strain_assumption="small_strain"
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -159,6 +160,19 @@ class ThermalSimulation:
         self.flip_event_history = []  # List of (global_step, local_step, x, y, z, mode)
         self.solver_args = {}
         
+        self.strain_assumption = strain_assumption
+        if self.strain_assumption == "finite_strain":
+            self.fast_patching_enabled = False
+            from .finite_strain_simulator import _make_identity_tensors_3d, build_ghat4_3d, build_C4_3d
+            self.I2_fs, self.I4_fs, self.I4rt_fs, self.I4s_fs, self.II_fs = _make_identity_tensors_3d(nx, ny, nz)
+            Lx, Ly, Lz = nx * pixel, ny * pixel, nz * pixel
+            self.Ghat4_fs = build_ghat4_3d(nx, ny, nz, Lx, Ly, Lz, even_grid=(nx%2==0 or ny%2==0 or nz%2==0))
+            self.C4_fs = build_C4_3d(self.E_field, self.nu_field, self.I4s_fs, self.II_fs)
+            
+            self.F_field = np.einsum('ij,xyz->xyzij', np.eye(3), np.ones((nx, ny, nz)))
+            self.F_plastic = np.einsum('ij,xyz->xyzij', np.eye(3), np.ones((nx, ny, nz)))
+            self.F_macro = np.eye(3)
+
         # Fast Patching (Predictor-Corrector) Setup
         self.fast_patching_enabled = fast_patching.get('enabled', False) if fast_patching else False
         self.patch_radius = fast_patching.get('patch_radius', 3) if fast_patching else 3
@@ -212,9 +226,50 @@ class ThermalSimulation:
         """Export current state to VTK."""
         from mgkmc.analysis import export_to_vtk
         export_to_vtk(filename, self.eps_field, self.sig_field, self.E, self.nu, 
-                      pixel=self.pixel, eps_plastic_field=self.eps_plastic, 
+                      pixel=self.pixel, eps_plastic_field=self.eps_plastic if self.strain_assumption != "finite_strain" else None, 
                       soft_prop_field=self.soft_prop, match_matplotlib_orientation=True,
                       Tlocal=self.Tlocal if self.enable_thermal else None)
+
+    def update_stresses(self):
+        """Update stress and strain fields, supporting both small and finite strain."""
+        if getattr(self, "strain_assumption", "small_strain") == "finite_strain":
+            from .finite_strain_simulator import build_finite_strain_bc_3d, finite_strain_solver_step_3d
+            drv_comp = getattr(self, "driving_component", (0, 0))
+            stress_tgts = getattr(self, "stress_targets", {})
+            eps_s = self.eps_macro[drv_comp]
+            
+            F_bar, F_mask, P_tgt, P_mask = build_finite_strain_bc_3d(
+                drv_comp, eps_s, stress_tgts, ndim=3
+            )
+            
+            F_in = np.einsum('xyzij->ijxyz', self.F_field)
+            Fp_in = np.einsum('xyzij->ijxyz', self.F_plastic)
+            
+            F_out, P_out, Sig_out, K4_out, F_bar_updated = finite_strain_solver_step_3d(
+                F_in, F_bar, self.Ghat4_fs, self.C4_fs, self.I2_fs, self.I4_fs, self.I4rt_fs, Fp=Fp_in,
+                driving_component=drv_comp, P_target=P_tgt, P_mask=P_mask,
+                E_avg=self.E_field.mean(), nu_avg=self.nu_field.mean(),
+                enable_console=False
+            )
+            
+            self.F_field = np.einsum('ijxyz->xyzij', F_out)
+            self.sig_field = np.einsum('ijxyz->xyzij', Sig_out)
+            
+            from .finite_strain_simulator import _dot22_3d, _trans2_3d
+            E_GL = 0.5 * (_dot22_3d(_trans2_3d(F_out), F_out) - self.I2_fs)
+            self.eps_field = np.einsum('ijxyz->xyzij', E_GL)
+            
+            self.F_macro = F_bar_updated
+            for ii in range(3):
+                for jj in range(3):
+                    if ii == jj:
+                        self.eps_macro[ii, jj] = self.F_macro[ii, jj] - 1.0
+                    else:
+                        self.eps_macro[ii, jj] = self.F_macro[ii, jj]
+        else:
+            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+            )
 
     def _init_logs(self, summary_filename="summary_log.txt", 
                    enable_summary_log=True, enable_global_log=True, 
@@ -375,10 +430,40 @@ class ThermalSimulation:
                 flipped_indices.append((ux, uy, uz, um))
                 
                 C = self.catalog[ux,uy,uz,um].copy()
-                apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
-                               self.catalog, ux, uy, uz, um, self.time, 
-                               self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
-                
+                if self.strain_assumption == "finite_strain":
+                    I_plus_C = np.eye(3) + C
+                    det_I_plus_C = np.linalg.det(I_plus_C)
+                    I_plus_C = I_plus_C / (max(1e-12, det_I_plus_C)**(1.0/3.0))
+                    self.F_plastic[ux, uy, uz] = np.dot(I_plus_C, self.F_plastic[ux, uy, uz])
+                    
+                    # Update softening locally
+                    e11, e22, e33 = C[0,0], C[1,1], C[2,2]
+                    e12, e13, e23 = C[0,1], C[0,2], C[1,2]
+                    sum_sq = (e12**2 + e23**2 + e13**2) + ((e22 - e33)**2 + (e33 - e11)**2 + (e11 - e22)**2) / 6.0
+                    
+                    gp_new = self.soft_prop[ux,uy,uz,0] + self.jp * sum_sq
+                    if self.softening_cap > 0 and gp_new > self.softening_cap: gp_new = self.softening_cap
+                    self.soft_prop[ux,uy,uz,0] = gp_new
+                    self.soft_prop[ux,uy,uz,1] = self.jt * sum_sq
+                    self.last_event_time[ux,uy,uz] = self.time
+                    
+                    if self.neighbor_softening_fraction > 0.0:
+                        nx, ny, nz = self.grid_shape
+                        for dx in (-1, 0, 1):
+                            for dy in (-1, 0, 1):
+                                for dz in (-1, 0, 1):
+                                    if dx == 0 and dy == 0 and dz == 0: continue
+                                    nx_n = (ux + dx + nx) % nx
+                                    ny_n = (uy + dy + ny) % ny
+                                    nz_n = (uz + dz + nz) % nz
+                                    gp_n_new = self.soft_prop[nx_n, ny_n, nz_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
+                                    if self.softening_cap > 0 and gp_n_new > self.softening_cap: gp_n_new = self.softening_cap
+                                    self.soft_prop[nx_n, ny_n, nz_n, 0] = gp_n_new
+                                    self.soft_prop[nx_n, ny_n, nz_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+                else:
+                    apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
+                                   self.catalog, ux, uy, uz, um, self.time, 
+                                   self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                 self.prev_strain_dir[ux,uy,uz] = C
                 
                 if self.enable_thermal:
@@ -415,9 +500,7 @@ class ThermalSimulation:
                 if strain_unit_tensor is not None:
                     self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
 
-            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-            )
+            self.update_stresses()
             
             if log_callback:
                 log_callback(local_step, n_flipped)
@@ -478,6 +561,9 @@ class ThermalSimulation:
                 stress_targets[(1,1)] = 0.0
                 stress_targets[(2,2)] = 0.0
 
+        self.driving_component = component
+        self.stress_targets = stress_targets
+        
         self._init_logs(summary_filename=summary_filename,
                         enable_summary_log=enable_summary_log,
                         enable_global_log=enable_global_log,
@@ -584,9 +670,7 @@ class ThermalSimulation:
         else:
             # KMC mode relaxation happens inside the main loop loop
             # BUT we should check if there's an instability at step 0
-            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-            )
+            self.update_stresses()
             sig_curr = self.sig_field.mean(axis=(0,1,2))
         
         stress_history = [sig_curr[stress_drop_component]]
@@ -652,8 +736,39 @@ class ThermalSimulation:
                         
                         C = self.catalog[x,y,z,m].copy()
                         
-                        apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
-                                       self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
+                        if self.strain_assumption == "finite_strain":
+                            I_plus_C = np.eye(3) + C
+                            det_I_plus_C = np.linalg.det(I_plus_C)
+                            I_plus_C = I_plus_C / (max(1e-12, det_I_plus_C)**(1.0/3.0))
+                            self.F_plastic[x, y, z] = np.dot(I_plus_C, self.F_plastic[x, y, z])
+                            
+                            # Update softening locally
+                            e11, e22, e33 = C[0,0], C[1,1], C[2,2]
+                            e12, e13, e23 = C[0,1], C[0,2], C[1,2]
+                            sum_sq = (e12**2 + e23**2 + e13**2) + ((e22 - e33)**2 + (e33 - e11)**2 + (e11 - e22)**2) / 6.0
+                            
+                            gp_new = self.soft_prop[x,y,z,0] + self.jp * sum_sq
+                            if self.softening_cap > 0 and gp_new > self.softening_cap: gp_new = self.softening_cap
+                            self.soft_prop[x,y,z,0] = gp_new
+                            self.soft_prop[x,y,z,1] = self.jt * sum_sq
+                            self.last_event_time[x,y,z] = self.time
+                            
+                            if self.neighbor_softening_fraction > 0.0:
+                                nx, ny, nz = self.grid_shape
+                                for dx in (-1, 0, 1):
+                                    for dy in (-1, 0, 1):
+                                        for dz in (-1, 0, 1):
+                                            if dx == 0 and dy == 0 and dz == 0: continue
+                                            nx_n = (x + dx + nx) % nx
+                                            ny_n = (y + dy + ny) % ny
+                                            nz_n = (z + dz + nz) % nz
+                                            gp_n_new = self.soft_prop[nx_n, ny_n, nz_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
+                                            if self.softening_cap > 0 and gp_n_new > self.softening_cap: gp_n_new = self.softening_cap
+                                            self.soft_prop[nx_n, ny_n, nz_n, 0] = gp_n_new
+                                            self.soft_prop[nx_n, ny_n, nz_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+                        else:
+                            apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
+                                           self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                         self.prev_strain_dir[x,y,z] = C
                         
                         if self.enable_thermal:
@@ -705,9 +820,7 @@ class ThermalSimulation:
                                 )
                                 self.flips_since_sync = 0
                         else:
-                            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                            )
+                            self.update_stresses()
                         
                         log_type = "kmc_instab" if is_instab else "kmc"
                         # In KMC mode, cascade counter is 0 as per request
@@ -738,13 +851,10 @@ class ThermalSimulation:
                     remaining_time = 0
                     
             # End of remaining_time inner loop (Elastic increment update)
-            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-            )
+            self.update_stresses()
             
-            # Elastic relaxation loop (Mixed BCs)
-            converged = False
-            for it in range(mixed_max_iter):
+            converged = True
+            if self.strain_assumption == "finite_strain":
                 if self.instability_mode == "cascade":
                     v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (not vtk_elastic_only and track_cascades) else None
                     l, f, _, sig_M, truncated, stopped_by_eps = self._run_cascade(
@@ -753,33 +863,50 @@ class ThermalSimulation:
                     )
                     if f > 0:
                         cascade_event_count += 1
-                        # Timing handled internally in _run_cascade loop
-                        pass
-                        # _do_logging(step, "cascade", cascade_event_count, f)  # Now handled iteration-by-iteration in _cascade_log_callback
                     if truncated or stopped_by_eps: 
                         self._close_logs()
                         return
-                    sig_curr = sig_M
                 else:
-                    sig_curr = self.sig_field.mean(axis=(0,1,2))
-                
-                stress_err_tensor = np.zeros((3,3))
-                max_err = 0.0
-                for idx_t, target_val in stress_targets.items():
-                    err = target_val - sig_curr[idx_t]
-                    stress_err_tensor[idx_t] = err
-                    max_err = max(max_err, abs(err))
-                
-                if max_err < mixed_tol:
-                    converged = True
-                    break
-                
-                eps_corr = get_correction_legacy(stress_err_tensor)
-                eps_corr[component] = 0.0
-                self.eps_macro += eps_corr
-                self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                    self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                )
+                    self.update_stresses()
+            else:
+                # Elastic relaxation loop (Mixed BCs)
+                converged = False
+                for it in range(mixed_max_iter):
+                    if self.instability_mode == "cascade":
+                        v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (not vtk_elastic_only and track_cascades) else None
+                        l, f, _, sig_M, truncated, stopped_by_eps = self._run_cascade(
+                            step, vtk_prefix=v_pfx, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
+                            eps_target=eps_target, component=component, log_callback=_cascade_log_callback
+                        )
+                        if f > 0:
+                            cascade_event_count += 1
+                            # Timing handled internally in _run_cascade loop
+                            pass
+                            # _do_logging(step, "cascade", cascade_event_count, f)  # Now handled iteration-by-iteration in _cascade_log_callback
+                        if truncated or stopped_by_eps: 
+                            self._close_logs()
+                            return
+                        sig_curr = sig_M
+                    else:
+                        sig_curr = self.sig_field.mean(axis=(0,1,2))
+                    
+                    stress_err_tensor = np.zeros((3,3))
+                    max_err = 0.0
+                    for idx_t, target_val in stress_targets.items():
+                        err = target_val - sig_curr[idx_t]
+                        stress_err_tensor[idx_t] = err
+                        max_err = max(max_err, abs(err))
+                    
+                    if max_err < mixed_tol:
+                        converged = True
+                        break
+                    
+                    eps_corr = get_correction_legacy(stress_err_tensor)
+                    eps_corr[component] = 0.0
+                    self.eps_macro += eps_corr
+                    self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                        self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                    )
             
             if not converged:
                 print(f"Warning: Mixed loop did not converge at step {step} (Err={max_err:.2e})")
