@@ -592,15 +592,26 @@ class KmcSimulation2D:
             if self.strain_assumption == "finite_strain":
                 self.elastic_run(self.eps_macro)
             else:
+                E_avg = self.E_field.mean()
+                nu_avg = self.nu_field.mean()
                 for it in range(mixed_max_iter):
                     sigM = self.elastic_run(self.eps_macro)
+                    stress_err = np.zeros((2, 2))
                     err_max = 0.0
                     for idx, target in stress_targets.items():
                         if idx[0] < 2 and idx[1] < 2:
                             err = target - sigM[idx]
+                            stress_err[idx] = err
                             err_max = max(err_max, abs(err))
-                            self.eps_macro[idx] += err / self.E_field.mean()
-                    if err_max < mixed_tol: break
+                    if err_max < mixed_tol:
+                        break
+                    
+                    # Coupled Poisson-corrected correction
+                    tr_sig = np.trace(stress_err)
+                    d_eps = (stress_err - nu_avg * tr_sig * np.eye(2)) / E_avg
+                    for idx in stress_targets.keys():
+                        if idx[0] < 2 and idx[1] < 2:
+                            self.eps_macro[idx] += d_eps[idx]
             
             elastic_steps_done += 1
             _do_logging(step, "ELAST", cascade_event_count, 0)

@@ -3,7 +3,7 @@ import numpy as np
 import os
 import shutil
 from mgkmc import ThermalSimulation
-from mgkmc.elasticity import get_uniaxial_stress_x
+
 
 def test_checkpoint_logic():
     # Setup
@@ -37,16 +37,17 @@ def test_checkpoint_logic():
         pixel=0.7,
         output_dir=OUTPUT_DIR,
         jp=11, 
-        jt=33
+        jt=33,
+        strain_rate=1.0e7
     )
 
     print("Running 10 steps...")
-    sim1.run_mixed(
+    sim1.run_simulation(
         n_global_steps=10,
-        strain_rate=1.0e7,
+        step_size=0.001,
         component=(0, 0),
         stress_targets={(1, 1): 0.0, (2, 2): 0.0},
-        vtk_mode="none",
+        vtk_interval="none",
         enable_console_log=False
     )
 
