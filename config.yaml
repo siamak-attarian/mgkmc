@@ -14,6 +14,7 @@ system:
   dimensionality: "2d" # Options: "2d" or "3d"
   plane_mode: "plane_strain" # Options: "plane_strain" or "plane_stress" (ignored if not 2d)
   strain_assumption: "finite_strain" # Options: "small_strain" or "finite_strain"
+  3d_barriers: false                 # Enable fully 3D isotropic STZ eigenstrain directions (default: false)
   nx: 32
   ny: 32
   nz: 1

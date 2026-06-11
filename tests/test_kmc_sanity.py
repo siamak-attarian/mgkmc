@@ -125,6 +125,65 @@ def test_kmc_small_strain_2d_mixed():
     sig_mean = sim.sig_field.mean(axis=(0, 1))
     print("Final mean stress:", sig_mean)
     assert np.abs(sig_mean[1, 1]) < 1e6, f"sig_yy ({sig_mean[1,1]}) not relaxed to 0.0!"
+    # Cleanup
+    if os.path.exists(output_dir):
+        try:
+            shutil.rmtree(output_dir)
+        except Exception:
+            pass
+
+def test_kmc_3d_barriers():
+    print("\n--- Testing 3D KMC with use_3d_barriers=True ---")
+    nx, ny, nz = 8, 8, 8
+    M = 5
+    gamma0 = 0.1
+    
+    E = np.ones((nx, ny, nz)) * 70.0 * 1e9  # Pa
+    nu = np.ones((nx, ny, nz)) * 0.3
+    
+    output_dir = "output_test_3d_barriers"
+    if os.path.exists(output_dir):
+        try:
+            shutil.rmtree(output_dir)
+        except Exception:
+            pass
+            
+    sim = ThermalSimulation(
+        nx, ny, nz, M, gamma0, E, nu,
+        pixel=1.0,
+        output_dir=output_dir,
+        temperature=0.0,
+        strain_rate=1.0,
+        use_3d_barriers=True,
+        barrier_generator="gaussian",
+        barrier_kwargs={"mean": 2.2, "std": 0.01}
+    )
+    
+    # 1. Assert shape
+    assert sim.catalog.shape == (nx, ny, nz, M, 3, 3)
+    
+    # 2. Assert that out-of-plane components are populated (not all zero)
+    # G[2, 2] is g_zz, G[0, 2] is g_xz, G[1, 2] is g_yz
+    out_of_plane_sum = (np.sum(np.abs(sim.catalog[..., 2, 2])) +
+                        np.sum(np.abs(sim.catalog[..., 0, 2])) +
+                        np.sum(np.abs(sim.catalog[..., 1, 2])))
+    assert out_of_plane_sum > 1e-5, "Out-of-plane components are all zero!"
+    
+    # 3. Run simulation to verify execution stability
+    sim.run_simulation(
+        n_global_steps=3,
+        step_size=0.001,
+        component=(0, 0),
+        stress_targets={(1, 1): 0.0, (2, 2): 0.0},
+        mixed_tol=1e4,
+        mixed_max_iter=10,
+        enable_console_log=True,
+        enable_summary_log=True,
+        enable_global_log=True
+    )
+    
+    # Assert stresses are populated
+    assert sim.sig_field.shape == (nx, ny, nz, 3, 3)
     
     # Cleanup
     if os.path.exists(output_dir):
@@ -137,4 +196,6 @@ if __name__ == "__main__":
     test_kmc_t0()
     test_kmc_t300()
     test_kmc_small_strain_2d_mixed()
+    test_kmc_3d_barriers()
+
 

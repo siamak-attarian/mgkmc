@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from mgkmc.stz.cascade import find_unstable, apply_flip_soa
 from mgkmc.stz.update_fft import update_stress_fft_full
-from mgkmc.stz.catalog import stz_catalog_glass
+from mgkmc.stz.catalog import stz_catalog_glass, stz_catalog_glass_3d
 from mgkmc.analysis import export_to_vtk
 from mgkmc.stz.kmc import compute_rates, select_event, decode_index
 from mgkmc.stz.barriers import compute_barrier
@@ -39,7 +39,8 @@ class ThermalSimulation:
                  enable_thermal=False, Cp=420.0, rho=6125.0,
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
-                 strain_assumption="small_strain"
+                 strain_assumption="small_strain",
+                 use_3d_barriers=False
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -135,6 +136,8 @@ class ThermalSimulation:
         # 6. Timing and Direction
         self.last_event_time = np.full((nx, ny, nz), -np.inf)
         self.prev_strain_dir = np.zeros((nx, ny, nz, 3, 3))
+        self.use_3d_barriers = use_3d_barriers
+
         
         # ================= Initialization =================
         # Q0
@@ -151,7 +154,10 @@ class ThermalSimulation:
         for x in range(nx):
             for y in range(ny):
                 for z in range(nz):
-                    self.catalog[x,y,z] = stz_catalog_glass(M, self.gamma0)
+                    if self.use_3d_barriers:
+                        self.catalog[x,y,z] = stz_catalog_glass_3d(M, self.gamma0)
+                    else:
+                        self.catalog[x,y,z] = stz_catalog_glass(M, self.gamma0)
 
         # Analysis State
         self.eps_macro = np.zeros((3,3)) 
@@ -475,11 +481,17 @@ class ThermalSimulation:
 
                 if self.redraw_directions or self.redraw_barriers:
                     if self.redraw_directions:
-                        self.catalog[ux,uy,uz] = stz_catalog_glass(self.M, self.gamma0)
+                        if self.use_3d_barriers:
+                            self.catalog[ux,uy,uz] = stz_catalog_glass_3d(self.M, self.gamma0)
+                        else:
+                            self.catalog[ux,uy,uz] = stz_catalog_glass(self.M, self.gamma0)
                     if self.redraw_barriers:
                         self.Q0[ux,uy,uz] = self.barrier_generator((self.M,))
                 else:
-                    self.catalog[ux,uy,uz,um] = stz_catalog_glass(1, self.gamma0)[0]
+                    if self.use_3d_barriers:
+                        self.catalog[ux,uy,uz,um] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                    else:
+                        self.catalog[ux,uy,uz,um] = stz_catalog_glass(1, self.gamma0)[0]
                     self.Q0[ux,uy,uz,um] = self.barrier_generator((1,))[0]
                 
                 if track_cascades:
@@ -779,10 +791,17 @@ class ThermalSimulation:
                                 self.Tlocal[x, y, z] = min(self.Tlocal[x, y, z], self.temperature_cap)
                         
                         if self.redraw_directions or self.redraw_barriers:
-                            if self.redraw_directions: self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
+                            if self.redraw_directions:
+                                if self.use_3d_barriers:
+                                    self.catalog[x,y,z] = stz_catalog_glass_3d(self.M, self.gamma0)
+                                else:
+                                    self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
                             if self.redraw_barriers: self.Q0[x,y,z] = self.barrier_generator((self.M,))
                         else:
-                            self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
+                            if self.use_3d_barriers:
+                                self.catalog[x,y,z,m] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                            else:
+                                self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
                             self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
                         
                         if getattr(self, 'fast_patching_enabled', False):

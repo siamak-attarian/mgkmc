@@ -69,6 +69,7 @@ def main():
     dimensionality = sys_conf.get('dimensionality', '3d').lower()
     plane_mode = sys_conf.get('plane_mode', 'plane_strain').lower()
     nx, ny, nz = sys_conf['nx'], sys_conf['ny'], sys_conf.get('nz', 1)
+    use_3d_barriers = sys_conf.get('3d_barriers', False)
     
     shape = (nx, ny, nz) if dimensionality == '3d' else (nx, ny)
     
@@ -209,7 +210,8 @@ def main():
             temperature_cap=temperature_cap,
             thermostat=thermostat,
             tau_bath=tau_bath,
-            strain_assumption=strain_assumption
+            strain_assumption=strain_assumption,
+            use_3d_barriers=use_3d_barriers
         )
 
     # ---------------------------------------------------------
