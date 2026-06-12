@@ -40,7 +40,9 @@ class ThermalSimulation:
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
                  strain_assumption="small_strain",
-                 use_3d_barriers=False
+                 use_3d_barriers=False,
+                 hyperelastic_model="svk",
+                 A_m=0.0, B_m=0.0, C_m=0.0
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -167,6 +169,10 @@ class ThermalSimulation:
         self.solver_args = {}
         
         self.strain_assumption = strain_assumption
+        self.hyperelastic_model = hyperelastic_model
+        self.A_m = A_m
+        self.B_m = B_m
+        self.C_m = C_m
         if self.strain_assumption == "finite_strain":
             self.fast_patching_enabled = False
             from .finite_strain_simulator import _make_identity_tensors_3d, build_ghat4_3d, build_C4_3d
@@ -245,7 +251,8 @@ class ThermalSimulation:
             eps_s = self.eps_macro[drv_comp]
             
             F_bar, F_mask, P_tgt, P_mask = build_finite_strain_bc_3d(
-                drv_comp, eps_s, stress_tgts, ndim=3
+                drv_comp, eps_s, stress_tgts, ndim=3,
+                F_bar_initial=getattr(self, "F_macro", None)
             )
             
             F_in = np.einsum('xyzij->ijxyz', self.F_field)
@@ -255,7 +262,9 @@ class ThermalSimulation:
                 F_in, F_bar, self.Ghat4_fs, self.C4_fs, self.I2_fs, self.I4_fs, self.I4rt_fs, Fp=Fp_in,
                 driving_component=drv_comp, P_target=P_tgt, P_mask=P_mask,
                 E_avg=self.E_field.mean(), nu_avg=self.nu_field.mean(),
-                enable_console=False
+                enable_console=False,
+                model_type=self.hyperelastic_model,
+                A_m=self.A_m, B_m=self.B_m, C_m=self.C_m
             )
             
             self.F_field = np.einsum('ijxyz->xyzij', F_out)
@@ -272,6 +281,17 @@ class ThermalSimulation:
                         self.eps_macro[ii, jj] = self.F_macro[ii, jj] - 1.0
                     else:
                         self.eps_macro[ii, jj] = self.F_macro[ii, jj]
+            
+            sig_mean = self.sig_field.mean(axis=(0,1,2))
+            if np.any(np.isnan(self.sig_field)) or np.any(np.isnan(self.F_field)) or np.max(np.abs(sig_mean)) / 1e9 > 20.0:
+                print("\n" + "="*80)
+                print("[ALERT] Weird/unstable stress detected in update_stresses!")
+                print(f"Macro Strain (diagonal): {[self.eps_macro[i,i] for i in range(3)]}")
+                print(f"Mean Stress (GPa):\n{sig_mean / 1e9}")
+                print(f"Mean F_field:\n{self.F_field.mean(axis=(0,1,2))}")
+                print(f"Max F_plastic:\n{np.max(np.abs(self.F_plastic), axis=(0,1,2))}")
+                print("="*80 + "\n")
+                raise ValueError(f"Simulation stopped due to unstable stress: {sig_mean/1e9} GPa")
         else:
             self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
                 self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args

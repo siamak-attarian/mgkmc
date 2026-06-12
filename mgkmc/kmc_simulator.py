@@ -22,7 +22,8 @@ class KmcSimulation2D:
                  enable_thermal=False, Cp=420.0, rho=6125.0,
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
-                 strain_assumption="small_strain"):
+                 strain_assumption="small_strain", hyperelastic_model="svk",
+                 A_m=0.0, B_m=0.0, C_m=0.0):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
@@ -122,6 +123,7 @@ class KmcSimulation2D:
         self.solver_args = {}
 
         self.strain_assumption = strain_assumption
+        self.hyperelastic_model = hyperelastic_model
         if self.strain_assumption == "finite_strain":
             self.fast_patching_enabled = False
             from .finite_strain_simulator import _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d
@@ -133,6 +135,9 @@ class KmcSimulation2D:
             self.F_field = np.einsum('ij,xy->xyij', np.eye(2), np.ones((nx, ny)))
             self.F_plastic = np.einsum('ij,xy->xyij', np.eye(2), np.ones((nx, ny)))
             self.F_macro = np.eye(2)
+            self.A_m = A_m
+            self.B_m = B_m
+            self.C_m = C_m
 
         if self.fast_patching_enabled:
             self._precompute_patch_kernels(self.E_field)
@@ -236,7 +241,8 @@ class KmcSimulation2D:
             eps_s = eps_macro[drv_comp]
             
             F_bar, F_mask, P_tgt, P_mask = build_finite_strain_bc(
-                drv_comp, eps_s, stress_tgts, self.plane_mode
+                drv_comp, eps_s, stress_tgts, self.plane_mode,
+                F_bar_initial=getattr(self, "F_macro", None)
             )
             
             F_in = np.einsum('xyij->ijxy', self.F_field)
@@ -246,7 +252,10 @@ class KmcSimulation2D:
                 F_in, F_bar, self.Ghat4_fs, self.C4_fs, self.I2_fs, self.I4_fs, self.I4rt_fs, Fp=Fp_in,
                 driving_component=drv_comp, P_target=P_tgt, P_mask=P_mask,
                 E_avg=self.E_field.mean(), nu_avg=self.nu_field.mean(),
-                enable_console=False
+                enable_console=False,
+                model_type=self.hyperelastic_model,
+                plane_mode=self.plane_mode,
+                A_m=self.A_m, B_m=self.B_m, C_m=self.C_m
             )
             
             self.F_field = np.einsum('ijxy->xyij', F_out)
@@ -264,7 +273,20 @@ class KmcSimulation2D:
                     else:
                         self.eps_macro[ii, jj] = self.F_macro[ii, jj]
             
-            return self.sig_field.mean(axis=(0,1))
+            sig_mean = self.sig_field.mean(axis=(0,1))
+            if np.any(np.isnan(self.sig_field)) or np.any(np.isnan(self.F_field)) or np.max(np.abs(sig_mean)) / 1e9 > 20.0:
+                print("\n" + "="*80)
+                print("[ALERT] Weird/unstable stress detected in elastic_run!")
+                print(f"Macro Strain (diagonal): {[self.eps_macro[i,i] for i in range(2)]}")
+                print(f"Mean Stress (GPa):\n{sig_mean / 1e9}")
+                print(f"Mean F_field:\n{self.F_field.mean(axis=(0,1))}")
+                print(f"Max F_plastic:\n{np.max(np.abs(self.F_plastic), axis=(0,1))}")
+                if getattr(self, "last_flip", None) is not None:
+                    print(f"Last flipped voxel (x, y, mode): {self.last_flip}")
+                print("="*80 + "\n")
+                raise ValueError(f"Simulation stopped due to unstable stress: {sig_mean/1e9} GPa")
+            
+            return sig_mean
         else:
             self.eps_field, self.sig_field, _, _ = spectral_solver_2d(
                 self.E_field, self.nu_field, eps_macro, eps_plastic=self.eps_plastic,
@@ -408,6 +430,7 @@ class KmcSimulation2D:
         
         self.driving_component = component
         self.stress_targets = stress_targets
+        self.last_flip = None
         
         self._init_logs(summary_filename, enable_summary_log, enable_global_log)
         start_time_total = time.time()
@@ -489,6 +512,7 @@ class KmcSimulation2D:
                         remaining_time -= t_wait
                         idx_flat = indices[select_event_2d(rates, total_rate)]
                         x, y, m = decode_index_2d(idx_flat, self.ny, self.M)
+                        self.last_flip = (x, y, m)
                         
                         is_instab = self.Q[x,y,m] <= self.stability_threshold
                         C = self.catalog[x,y,m].copy()

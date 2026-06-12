@@ -68,30 +68,87 @@ def main():
     sys_conf = config['system']
     dimensionality = sys_conf.get('dimensionality', '3d').lower()
     plane_mode = sys_conf.get('plane_mode', 'plane_strain').lower()
+    hyperelastic_model = sys_conf.get('hyperelastic_model', 'svk').lower()
     nx, ny, nz = sys_conf['nx'], sys_conf['ny'], sys_conf.get('nz', 1)
     use_3d_barriers = sys_conf.get('3d_barriers', False)
     
     shape = (nx, ny, nz) if dimensionality == '3d' else (nx, ny)
     
-    # Material Elastic Modulus (E) and Poisson's ratio (nu)
-    mat_conf = config['material']
-    E_field = generate_field(
-        mat_conf['E']['mode'], 
-        shape, 
-        constant_val=mat_conf['E'].get('value', 70.0),
-        params=mat_conf['E'].get('parameters', {})
-    )
-    nu_field = generate_field(
-        mat_conf['nu']['mode'], 
-        shape, 
-        constant_val=mat_conf['nu'].get('value', 0.3),
-        params=mat_conf['nu'].get('parameters', {})
-    )
+    # Helper to parse material property that could be a dictionary or a float
+    def parse_material_property(config_prop, default_val):
+        if config_prop is None:
+            return "constant", default_val, {}
+        if isinstance(config_prop, dict):
+            mode = config_prop.get('mode', 'constant')
+            val = config_prop.get('value', default_val)
+            params = config_prop.get('parameters', {})
+            return mode, val, params
+        else:
+            return "constant", float(config_prop), {}
 
-    # Autoconvert E to Pa if supplied in GPa
-    if E_field.mean() < 1e6:
-        print(" [run.py] Detected E in GPa (mean < 1e6). Converting to Pa (*1e9).")
-        E_field = E_field * 1e9
+    # Material Elastic Modulus (E) and Poisson's ratio (nu), or Lamé parameters (mu, lambda)
+    mat_conf = config['material']
+    if 'mu' in mat_conf and 'lambda' in mat_conf:
+        mu_mode, mu_val, mu_params = parse_material_property(mat_conf.get('mu'), 26.92)
+        mu_field = generate_field(
+            mu_mode,
+            shape,
+            constant_val=mu_val,
+            params=mu_params
+        )
+        lambda_mode, lambda_val, lambda_params = parse_material_property(mat_conf.get('lambda'), 40.38)
+        lambda_field = generate_field(
+            lambda_mode,
+            shape,
+            constant_val=lambda_val,
+            params=lambda_params
+        )
+        # Scale to Pa if supplied in GPa
+        if mu_field.mean() < 1e6:
+            print(" [run.py] Detected mu in GPa (mean < 1e6). Converting to Pa (*1e9).")
+            mu_field = mu_field * 1e9
+        if lambda_field.mean() < 1e6:
+            print(" [run.py] Detected lambda in GPa (mean < 1e6). Converting to Pa (*1e9).")
+            lambda_field = lambda_field * 1e9
+
+        # Calculate E_field and nu_field from mu_field and lambda_field
+        denom = lambda_field + mu_field
+        denom_safe = np.where(denom == 0.0, 1e-20, denom)
+        E_field = mu_field * (3.0 * lambda_field + 2.0 * mu_field) / denom_safe
+        nu_field = lambda_field / (2.0 * denom_safe)
+        print(" [run.py] Calculated E and nu fields from mu and lambda fields.")
+    else:
+        E_mode, E_val, E_params = parse_material_property(mat_conf.get('E'), 70.0)
+        E_field = generate_field(
+            E_mode, 
+            shape, 
+            constant_val=E_val,
+            params=E_params
+        )
+        nu_mode, nu_val, nu_params = parse_material_property(mat_conf.get('nu'), 0.3)
+        nu_field = generate_field(
+            nu_mode, 
+            shape, 
+            constant_val=nu_val,
+            params=nu_params
+        )
+        # Autoconvert E to Pa if supplied in GPa
+        if E_field.mean() < 1e6:
+            print(" [run.py] Detected E in GPa (mean < 1e6). Converting to Pa (*1e9).")
+            E_field = E_field * 1e9
+
+    # Load Murnaghan parameters (defaulting to 0.0)
+    A_val = float(mat_conf.get('A', 0.0))
+    B_val = float(mat_conf.get('B', 0.0))
+    C_val = float(mat_conf.get('C', 0.0))
+
+    # Autoconvert Murnaghan constants to Pa if supplied in GPa (values < 1e6 except 0.0)
+    if abs(A_val) < 1e6 and A_val != 0.0:
+        A_val *= 1e9
+    if abs(B_val) < 1e6 and B_val != 0.0:
+        B_val *= 1e9
+    if abs(C_val) < 1e6 and C_val != 0.0:
+        C_val *= 1e9
 
     # ---------------------------------------------------------
     # 3. Setup Physics & Dynamics
@@ -162,9 +219,12 @@ def main():
             thermal_diffusivity=thermal_diffusivity,
             thermal_coords=thermal_coords,
             temperature_cap=temperature_cap,
-            thermostat=thermostat,
             tau_bath=tau_bath,
-            strain_assumption=strain_assumption
+            strain_assumption=strain_assumption,
+            hyperelastic_model=hyperelastic_model,
+            A_m=A_val,
+            B_m=B_val,
+            C_m=C_val
         )
     else:
         print("Initializing 3D ThermalSimulation environment...")
@@ -211,7 +271,11 @@ def main():
             thermostat=thermostat,
             tau_bath=tau_bath,
             strain_assumption=strain_assumption,
-            use_3d_barriers=use_3d_barriers
+            use_3d_barriers=use_3d_barriers,
+            hyperelastic_model=hyperelastic_model,
+            A_m=A_val,
+            B_m=B_val,
+            C_m=C_val
         )
 
     # ---------------------------------------------------------
@@ -262,7 +326,7 @@ def main():
     loading_conf = config.get('loading', {})
     eps_target = float(loading_conf.get('eps_target', dyn_conf.get('eps_target', 0.14)))
     step_size = float(loading_conf.get('step_size', dyn_conf.get('step_size', 1e-4)))
-    calculated_n_steps = int(eps_target / step_size)
+    calculated_n_steps = int(abs(eps_target) / abs(step_size))
 
     if sim:
         print(f"Temperature: {sim.temperature} K, Strain Rate: {sim.strain_rate:.2e} 1/s")
@@ -317,7 +381,11 @@ def main():
                         checkpoint_interval=chk_val,
                         checkpoint_path=os.path.join(out_dir, 'checkpoint'),
                         vtk_interval=vtk_val,
-                        vtk_path=os.path.join(out_dir, 'step')
+                        vtk_path=os.path.join(out_dir, 'step'),
+                        model_type=hyperelastic_model,
+                        A_m=A_val,
+                        B_m=B_val,
+                        C_m=C_val
                     )
 
                 print(f"2D Finite-Strain simulation completed. "
@@ -401,7 +469,11 @@ def main():
                         checkpoint_interval=chk_val,
                         checkpoint_path=os.path.join(out_dir, 'checkpoint'),
                         vtk_interval=vtk_val,
-                        vtk_path=os.path.join(out_dir, 'step')
+                        vtk_path=os.path.join(out_dir, 'step'),
+                        model_type=hyperelastic_model,
+                        A_m=A_val,
+                        B_m=B_val,
+                        C_m=C_val
                     )
 
                 print(f"3D Finite-Strain simulation completed. Logs written to {out_dir}.")

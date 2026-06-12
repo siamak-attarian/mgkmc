@@ -296,10 +296,11 @@ def _invert_Fp_3d(Fp):
     return Fp_inv
 
 
-def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None):
+def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk", plane_mode="plane_strain", A_m=0.0, B_m=0.0, C_m=0.0):
     """
     Compute 1st Piola-Kirchhoff stress P and consistent tangent K4 from F,
     supporting an optional plastic deformation gradient field Fp (eigenstrain).
+    Supports 'svk' (St. Venant-Kirchhoff) or 'neo_hookean' models.
     """
     ndim = 2
     
@@ -314,14 +315,191 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None):
         Fp_inv[1, 0] = -Fp[1, 0] / det_safe
         
         Fe = np.einsum('ijxy,jkxy->ikxy', F, Fp_inv, optimize=True)
+    else:
+        Fe = F
+        
+    if model_type == "neo_hookean":
+        if plane_mode == "plane_stress":
+            # Extract effective plane stress lam_2d and shear modulus mu from C4
+            lam_2d = C4[0, 0, 1, 1]
+            mu = C4[0, 1, 0, 1]
+            
+            # Calculate 3D lambda
+            lam_3d = (2.0 * mu * lam_2d) / np.maximum(1e-14, 2.0 * mu - lam_2d)
+            
+            # Ce = Fe^T * Fe
+            Ce = np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True)
+            
+            # det(Ce) = Je^2
+            Je = Fe[0, 0] * Fe[1, 1] - Fe[0, 1] * Fe[1, 0]
+            Je_safe = np.maximum(1e-14, Je)
+            
+            # Newton-Raphson to solve transcendental equation for out-of-plane stretch:
+            # x = F33^2
+            # mu * x + 0.5 * lam_3d * ln(x) = mu - lam_3d * ln(Je_safe)
+            x = np.ones_like(Je_safe)
+            target = mu - lam_3d * np.log(Je_safe)
+            for _ in range(10):
+                f = mu * x + 0.5 * lam_3d * np.log(x) - target
+                df = mu + 0.5 * lam_3d / x
+                dx = - f / df
+                x = np.maximum(1e-10, x + dx)
+                if np.max(np.abs(dx)) < 1e-12:
+                    break
+            
+            F33 = np.sqrt(np.maximum(1e-12, x))
+            
+            # Inverse of Ce
+            detCe = Ce[0, 0] * Ce[1, 1] - Ce[0, 1] * Ce[1, 0]
+            detCe_safe = np.where(np.abs(detCe) < 1e-14, 1e-14, detCe)
+            
+            invC = np.zeros_like(Ce)
+            invC[0, 0] =  Ce[1, 1] / detCe_safe
+            invC[1, 1] =  Ce[0, 0] / detCe_safe
+            invC[0, 1] = -Ce[0, 1] / detCe_safe
+            invC[1, 0] = -Ce[1, 0] / detCe_safe
+            
+            coeff = -mu * x
+            S = mu[np.newaxis, np.newaxis, :, :] * I2 + coeff[np.newaxis, np.newaxis, :, :] * invC
+            
+            coeff_tan = mu * x
+            lam_star = (2.0 * lam_3d * coeff_tan) / np.maximum(1e-14, lam_3d + 2.0 * coeff_tan)
+            
+            term1_tan = lam_star[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * \
+                        np.einsum('ijxy,klxy->ijklxy', invC, invC)
+            term2_tan = coeff_tan[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (
+                        np.einsum('ikxy,jlxy->ijklxy', invC, invC) +
+                        np.einsum('ilxy,jkxy->ijklxy', invC, invC)
+            )
+            C4_eff = term1_tan + term2_tan
+        else:
+            # plane_strain: F33 = 1.0, and lam from C4 is the 3D lambda
+            lam = C4[0, 0, 1, 1]
+            mu = C4[0, 1, 0, 1]
+            F33 = np.ones_like(Fe[0, 0])
+            
+            Ce = np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True)
+            
+            # det(Ce) = Je^2
+            Je = Fe[0, 0] * Fe[1, 1] - Fe[0, 1] * Fe[1, 0]
+            Je_safe = np.maximum(1e-14, Je)
+            logJe = np.log(Je_safe)
+            
+            detCe = Ce[0, 0] * Ce[1, 1] - Ce[0, 1] * Ce[1, 0]
+            detCe_safe = np.where(np.abs(detCe) < 1e-14, 1e-14, detCe)
+            
+            invC = np.zeros_like(Ce)
+            invC[0, 0] =  Ce[1, 1] / detCe_safe
+            invC[1, 1] =  Ce[0, 0] / detCe_safe
+            invC[0, 1] = -Ce[0, 1] / detCe_safe
+            invC[1, 0] = -Ce[1, 0] / detCe_safe
+            
+            coeff = -mu + lam * logJe
+            S = mu[np.newaxis, np.newaxis, :, :] * I2 + coeff[np.newaxis, np.newaxis, :, :] * invC
+            
+            coeff_tan = mu - lam * logJe
+            term1_tan = lam[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * \
+                        np.einsum('ijxy,klxy->ijklxy', invC, invC)
+            term2_tan = coeff_tan[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (
+                        np.einsum('ikxy,jlxy->ijklxy', invC, invC) +
+                        np.einsum('ilxy,jkxy->ijklxy', invC, invC)
+            )
+            C4_eff = term1_tan + term2_tan
+    elif model_type == "murnaghan":
+        nx, ny = Fe.shape[2], Fe.shape[3]
+        A_arr = np.full((nx, ny), float(A_m)) if isinstance(A_m, (int, float, np.number)) else np.array(A_m)
+        B_arr = np.full((nx, ny), float(B_m)) if isinstance(B_m, (int, float, np.number)) else np.array(B_m)
+        C_arr = np.full((nx, ny), float(C_m)) if isinstance(C_m, (int, float, np.number)) else np.array(C_m)
+
+        if plane_mode == "plane_stress":
+            lam_2d = C4[0, 0, 1, 1]
+            mu = C4[0, 1, 0, 1]
+            lam = (2.0 * mu * lam_2d) / np.maximum(1e-14, 2.0 * mu - lam_2d)
+        else:
+            lam = C4[0, 0, 1, 1]
+            mu = C4[0, 1, 0, 1]
+
+        Ce = np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True)
+        E_GL_2d = 0.5 * (Ce - I2)
+
+        if plane_mode == "plane_stress":
+            trE_2d = E_GL_2d[0, 0] + E_GL_2d[1, 1]
+            trE2_2d = E_GL_2d[0, 0]**2 + E_GL_2d[1, 1]**2 + 2.0 * E_GL_2d[0, 1] * E_GL_2d[1, 0]
+            
+            a = A_arr + 3.0 * B_arr + C_arr
+            b = lam + 2.0 * mu + 2.0 * (A_arr + B_arr) * trE_2d
+            c = lam * trE_2d + A_arr * (trE_2d**2) + B_arr * trE2_2d
+            
+            E33 = np.zeros((nx, ny))
+            small_a = np.abs(a) < 1e-12
+            
+            if np.any(small_a):
+                E33[small_a] = -c[small_a] / np.maximum(1e-14, b[small_a])
+            if np.any(~small_a):
+                disc = b[~small_a]**2 - 4.0 * a[~small_a] * c[~small_a]
+                disc = np.maximum(0.0, disc)
+                sgn_b = np.sign(b[~small_a])
+                sgn_b[sgn_b == 0] = 1.0
+                E33[~small_a] = (-b[~small_a] + sgn_b * np.sqrt(disc)) / (2.0 * a[~small_a])
+                
+            F33 = np.sqrt(np.maximum(1e-12, 1.0 + 2.0 * E33))
+            
+            E_GL = np.zeros((3, 3, nx, ny))
+            E_GL[0:2, 0:2] = E_GL_2d
+            E_GL[2, 2] = E33
+        else:
+            E_GL = np.zeros((3, 3, nx, ny))
+            E_GL[0:2, 0:2] = E_GL_2d
+            F33 = np.ones((nx, ny))
+            
+        trE = E_GL[0, 0] + E_GL[1, 1] + E_GL[2, 2]
+        trE2 = np.einsum('ijxy,jixy->xy', E_GL, E_GL)
+        E2 = np.einsum('ijxy,jkxy->ikxy', E_GL, E_GL)
+        
+        I3 = np.einsum('ij,xy->ijxy', np.eye(3), np.ones((nx, ny)))
+        S_3d = (lam * trE + A_arr * (trE**2) + B_arr * trE2)[np.newaxis, np.newaxis, :, :] * I3 \
+             + 2.0 * (mu + B_arr * trE)[np.newaxis, np.newaxis, :, :] * E_GL \
+             + C_arr[np.newaxis, np.newaxis, :, :] * E2
+             
+        S = S_3d[0:2, 0:2]
+        
+        E_in = E_GL[0:2, 0:2]
+        II = _dyad22(I2, I2)
+        I4s = 0.5 * (I4 + I4rt)
+        
+        term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * II
+        
+        I_dyad_E = np.einsum('ijxy,klxy->ijklxy', I2, E_in)
+        E_dyad_I = np.einsum('ijxy,klxy->ijklxy', E_in, I2)
+        term2 = (2.0 * B_arr)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (I_dyad_E + E_dyad_I)
+        
+        term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * I4s
+        
+        term4_part1 = np.einsum('ikxy,jlxy->ijklxy', I2, E_in) + np.einsum('ikxy,jlxy->ijklxy', E_in, I2)
+        term4_part2 = np.einsum('ilxy,jkxy->ijklxy', I2, E_in) + np.einsum('ilxy,jkxy->ijklxy', E_in, I2)
+        K_E = 0.5 * (term4_part1 + term4_part2)
+        term4 = C_arr[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * K_E
+        
+        C4_eff = term1 + term2 + term3 + term4
+    else:
+        # Default: St. Venant-Kirchhoff (SVK)
         E_GL = 0.5 * (np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True) - I2)
         S = np.einsum('ijklxy,lkxy->ijxy', C4, E_GL, optimize=True)
-        
+        C4_eff = C4
+        if plane_mode == "plane_stress":
+            lam_2d = C4[0, 0, 1, 1]
+            mu = C4[0, 1, 0, 1]
+            tr_E = E_GL[0, 0] + E_GL[1, 1]
+            E_GL_33 = - (lam_2d / (2.0 * mu)) * tr_E
+            F33 = np.sqrt(np.maximum(1e-12, 1.0 + 2.0 * E_GL_33))
+        else:
+            F33 = np.ones_like(Fe[0, 0])
+
+    if Fp is not None:
         P = np.einsum('ikxy,klxy,jlxy->ijxy', Fe, S, Fp_inv, optimize=True)
         S_ref = np.einsum('mkxy,klxy,jlxy->mjxy', Fp_inv, S, Fp_inv, optimize=True)
         
-        # Decomposed K4 contraction for speedup
-        A = np.einsum('klmnxy,jlxy->kjmnxy', C4, Fp_inv, optimize=True)
+        A = np.einsum('klmnxy,jlxy->kjmnxy', C4_eff, Fp_inv, optimize=True)
         B = np.einsum('kjmnxy,bmxy->kjbnxy', A, Fp_inv, optimize=True)
         C = np.einsum('kjbnxy,ikxy->ijbnxy', B, Fe, optimize=True)
         term2 = np.einsum('ijbnxy,anxy->ijabxy', C, Fe, optimize=True)
@@ -329,15 +507,11 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None):
         term1 = np.einsum('bjxy,ia->ijabxy', S_ref, np.eye(ndim), optimize=True)
         K4 = term1 + term2
     else:
-        Fe = F
-        E_GL = 0.5 * (np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True) - I2)
-        S = np.einsum('ijklxy,lkxy->ijxy', C4, E_GL, optimize=True)
-        
         P = np.einsum('ijxy,jkxy->ikxy', Fe, S, optimize=True)
         
         term1 = np.einsum('ijxy,jkmnxy->ikmnxy', S, I4, optimize=True)
         
-        FC4 = np.einsum('ijxy,jkmnxy->ikmnxy', Fe, C4, optimize=True)
+        FC4 = np.einsum('ijxy,jkmnxy->ikmnxy', Fe, C4_eff, optimize=True)
         Ft = np.einsum('ijxy->jixy', Fe)
         FC4Ft = np.einsum('ijklxy,lmxy->ijkmxy', FC4, Ft, optimize=True)
         term2_part1 = np.einsum('ijklxy,lkmnxy->ijmnxy', I4rt, FC4Ft, optimize=True)
@@ -345,18 +519,18 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None):
         
         K4 = term1 + term2
 
-    return P, K4
+    return P, K4, F33
 
 
 # ---------------------------------------------------------------------------
 # Cauchy stress from P and F
 # ---------------------------------------------------------------------------
 
-def cauchy_from_P(P, F):
+def cauchy_from_P(P, F, F33=None):
     """
     Convert 1st Piola-Kirchhoff stress P to Cauchy stress σ.
 
-        σ = (1/J) · P · Fᵀ       J = det(F)
+        σ = (1/J) · P · Fᵀ       J = det(F) * F33
 
     Operates pointwise on [2, 2, nx, ny] fields.
     Returns σ as [2, 2, nx, ny].
@@ -364,6 +538,8 @@ def cauchy_from_P(P, F):
     ndim, _, nx, ny = P.shape
     # det(F) per pixel
     J = (F[0, 0] * F[1, 1] - F[0, 1] * F[1, 0])  # [nx, ny]
+    if F33 is not None:
+        J = J * F33
     J_safe = np.where(np.abs(J) < 1e-14, 1e-14, J)
 
     # P · Fᵀ  pointwise
@@ -470,7 +646,7 @@ def build_C4_3d(E_field, nu_field, I4s, II):
 # Constitutive model in 3D
 # ---------------------------------------------------------------------------
 
-def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None):
+def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk", A_m=0.0, B_m=0.0, C_m=0.0):
     """
     Compute 1st Piola-Kirchhoff stress P and consistent tangent K4 in 3D,
     supporting an optional plastic deformation gradient field Fp.
@@ -480,14 +656,57 @@ def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None):
     if Fp is not None:
         Fp_inv = _invert_Fp_3d(Fp)
         Fe = np.einsum('ijxyz,jkxyz->ikxyz', F, Fp_inv, optimize=True)
+    else:
+        Fe = F
+
+    if model_type == "murnaghan":
+        nx, ny, nz = Fe.shape[2], Fe.shape[3], Fe.shape[4]
+        A_arr = np.full((nx, ny, nz), float(A_m)) if isinstance(A_m, (int, float, np.number)) else np.array(A_m)
+        B_arr = np.full((nx, ny, nz), float(B_m)) if isinstance(B_m, (int, float, np.number)) else np.array(B_m)
+        C_arr = np.full((nx, ny, nz), float(C_m)) if isinstance(C_m, (int, float, np.number)) else np.array(C_m)
+
+        lam = C4[0, 0, 1, 1]
+        mu = C4[0, 1, 0, 1]
+
+        Ce = np.einsum('jixyz,jkxyz->ikxyz', Fe, Fe, optimize=True)
+        E_GL = 0.5 * (Ce - I2)
+
+        trE = E_GL[0, 0] + E_GL[1, 1] + E_GL[2, 2]
+        trE2 = np.einsum('ijxyz,jixyz->xyz', E_GL, E_GL)
+        E2 = np.einsum('ijxyz,jkxyz->ikxyz', E_GL, E_GL)
+
+        S = (lam * trE + A_arr * (trE**2) + B_arr * trE2)[np.newaxis, np.newaxis, :, :, :] * I2 \
+          + 2.0 * (mu + B_arr * trE)[np.newaxis, np.newaxis, :, :, :] * E_GL \
+          + C_arr[np.newaxis, np.newaxis, :, :, :] * E2
+
+        # Tangent stiffness C4_eff
+        I4s = 0.5 * (I4 + I4rt)
+        II = _dyad22_3d(I2, I2)
+        
+        term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * II
+
+        I_dyad_E = np.einsum('ijxyz,klxyz->ijklxyz', I2, E_GL)
+        E_dyad_I = np.einsum('ijxyz,klxyz->ijklxyz', E_GL, I2)
+        term2 = (2.0 * B_arr)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * (I_dyad_E + E_dyad_I)
+
+        term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * I4s
+
+        term4_part1 = np.einsum('ikxyz,jlxyz->ijklxyz', I2, E_GL) + np.einsum('ikxyz,jlxyz->ijklxyz', E_GL, I2)
+        term4_part2 = np.einsum('ilxyz,jkxyz->ijklxyz', I2, E_GL) + np.einsum('ilxyz,jkxyz->ijklxyz', E_GL, I2)
+        K_E = 0.5 * (term4_part1 + term4_part2)
+        term4 = C_arr[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * K_E
+
+        C4_eff = term1 + term2 + term3 + term4
+    else:
         E_GL = 0.5 * (np.einsum('jixyz,jkxyz->ikxyz', Fe, Fe, optimize=True) - I2)
         S    = np.einsum('ijklxyz,lkxyz->ijxyz', C4, E_GL, optimize=True)
-        
+        C4_eff = C4
+
+    if Fp is not None:
         P = np.einsum('ikxyz,klxyz,jlxyz->ijxyz', Fe, S, Fp_inv, optimize=True)
         S_ref = np.einsum('mkxyz,klxyz,jlxyz->mjxyz', Fp_inv, S, Fp_inv, optimize=True)
         
-        # Decomposed K4 contraction for speedup
-        A = np.einsum('klmnxyz,jlxyz->kjmnxyz', C4, Fp_inv, optimize=True)
+        A = np.einsum('klmnxyz,jlxyz->kjmnxyz', C4_eff, Fp_inv, optimize=True)
         B = np.einsum('kjmnxyz,bmxyz->kjbnxyz', A, Fp_inv, optimize=True)
         C = np.einsum('kjbnxyz,ikxyz->ijbnxyz', B, Fe, optimize=True)
         term2 = np.einsum('ijbnxyz,anxyz->ijabxyz', C, Fe, optimize=True)
@@ -495,15 +714,11 @@ def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None):
         term1 = np.einsum('bjxyz,ia->ijabxyz', S_ref, np.eye(ndim), optimize=True)
         K4 = term1 + term2
     else:
-        Fe = F
-        E_GL = 0.5 * (np.einsum('jixyz,jkxyz->ikxyz', Fe, Fe, optimize=True) - I2)
-        S    = np.einsum('ijklxyz,lkxyz->ijxyz', C4, E_GL, optimize=True)
-        
         P = np.einsum('ijxyz,jkxyz->ikxyz', Fe, S, optimize=True)
         
         term1 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', S, I4, optimize=True)
         
-        FC4 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', Fe, C4, optimize=True)
+        FC4 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', Fe, C4_eff, optimize=True)
         Ft = np.einsum('ijxyz->jixyz', Fe)
         FC4Ft = np.einsum('ijklxyz,lmxyz->ijkmxyz', FC4, Ft, optimize=True)
         term2_part1 = np.einsum('ijklxyz,lkmnxyz->ijmnxyz', I4rt, FC4Ft, optimize=True)
@@ -539,7 +754,7 @@ def cauchy_from_P_3d(P, F):
 # ---------------------------------------------------------------------------
 
 def build_finite_strain_bc(driving_component, eps_target_step,
-                           mixed_targets, plane_mode, ndim=2):
+                           mixed_targets, plane_mode, ndim=2, F_bar_initial=None):
     """
     Translate the standard MGKMC config keys into finite-strain BC masks.
 
@@ -550,6 +765,7 @@ def build_finite_strain_bc(driving_component, eps_target_step,
     mixed_targets     : dict {(i,j): stress_value_Pa}
     plane_mode        : 'plane_strain' or 'plane_stress'
     ndim              : 2
+    F_bar_initial     : ndarray (ndim, ndim), optional — previously converged F_bar
 
     Returns
     -------
@@ -558,7 +774,11 @@ def build_finite_strain_bc(driving_component, eps_target_step,
     P_target : ndarray (ndim, ndim) — stress targets (Pa), 0 where free
     P_mask   : bool ndarray (ndim, ndim) — True where avg stress is prescribed
     """
-    F_bar    = np.eye(ndim)          # start from identity
+    if F_bar_initial is None:
+        F_bar = np.eye(ndim)          # start from identity
+    else:
+        F_bar = F_bar_initial.copy()
+        
     F_mask   = np.zeros((ndim, ndim), dtype=bool)
     P_target = np.zeros((ndim, ndim))
     P_mask   = np.zeros((ndim, ndim), dtype=bool)
@@ -593,7 +813,7 @@ def build_finite_strain_bc(driving_component, eps_target_step,
         comp = (k, k)
         if comp in mixed_targets:
             # Stress-free (or prescribed stress): F_kk is FREE, stress is driven
-            # F_bar[k,k] stays at 1.0 initially; outer loop will adjust it
+            # Keep F_bar[k,k] as is (from F_bar_initial if provided, otherwise 1.0)
             P_target[k, k] = mixed_targets[comp]
             P_mask[k, k]   = True
         else:
@@ -609,7 +829,9 @@ def build_finite_strain_bc(driving_component, eps_target_step,
 # ---------------------------------------------------------------------------
 
 def _newton_cg_step(F, F_bar, Ghat4, C4, I2, I4, I4rt,
-                    tol_NW=1e-5, tol_CG=1e-6, max_NW=20):
+                    tol_NW=1e-5, tol_CG=1e-6, max_NW=20,
+                    model_type="svk", plane_mode="plane_strain",
+                    A_m=0.0, B_m=0.0, C_m=0.0):
     """
     Run Newton-CG iterations to enforce  G : P(F) = 0
     with prescribed macroscopic deformation gradient F̄.
@@ -635,7 +857,7 @@ def _newton_cg_step(F, F_bar, Ghat4, C4, I2, I4, I4rt,
     DbarF_grid = np.einsum('ij,xy->ijxy', DbarF, np.ones((nx, ny)))
 
     # Pre-compute constitutive response at current F
-    P, K4 = constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt)
+    P, K4, _ = constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, model_type=model_type, plane_mode=plane_mode, A_m=A_m, B_m=B_m, C_m=C_m)
     Fn    = np.linalg.norm(F)
 
     def G_op(A2):
@@ -680,7 +902,7 @@ def _newton_cg_step(F, F_bar, Ghat4, C4, I2, I4, I4rt,
             F = F + dF                 # pure Newton update
 
         # Recompute constitutive response at updated F
-        P, K4 = constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt)
+        P, K4, _ = constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, model_type=model_type, plane_mode=plane_mode, A_m=A_m, B_m=B_m, C_m=C_m)
 
         # Convergence check (skip iteration 0 as in de Geus code)
         res_norm = np.linalg.norm(dFm) / (np.linalg.norm(F) + 1e-20)
@@ -696,7 +918,8 @@ def finite_strain_solver_step_2d(
     E_avg=100e9, nu_avg=0.3,
     tol_NW=1e-5, tol_CG=1e-6, max_NW=20,
     tol_macro=1e6, max_iter_macro=20,
-    enable_console=True
+    enable_console=True, model_type="svk", plane_mode="plane_strain",
+    A_m=0.0, B_m=0.0, C_m=0.0
 ):
     """
     Solves a single step of the finite strain problem in 2D, enforcing mixed BCs on F_bar.
@@ -722,7 +945,7 @@ def finite_strain_solver_step_2d(
         DbarF = F_bar_current - F_start.mean(axis=(2, 3))
         DbarF_grid = np.einsum('ij,xy->ijxy', DbarF, np.ones((nx, ny)))
         
-        P, K4 = constitutive_hyperelastic_2d(F_start, C4, I2, I4, I4rt, Fp=Fp)
+        P, K4, F33 = constitutive_hyperelastic_2d(F_start, C4, I2, I4, I4rt, Fp=Fp, model_type=model_type, plane_mode=plane_mode, A_m=A_m, B_m=B_m, C_m=C_m)
         
         def G_op(A2):
             return _project(A2, Ghat4)
@@ -741,6 +964,17 @@ def finite_strain_solver_step_2d(
         )
         
         F_curr = F_start.copy()
+        if Fp is not None:
+            det = Fp[0, 0] * Fp[1, 1] - Fp[0, 1] * Fp[1, 0]
+            det_safe = np.where(np.abs(det) < 1e-14, 1e-14, det)
+            Fp_inv = np.zeros_like(Fp)
+            Fp_inv[0, 0] =  Fp[1, 1] / det_safe
+            Fp_inv[1, 1] =  Fp[0, 0] / det_safe
+            Fp_inv[0, 1] = -Fp[0, 1] / det_safe
+            Fp_inv[1, 0] = -Fp[1, 0] / det_safe
+        else:
+            Fp_inv = None
+
         for i_NW in range(max_NW):
             if i_NW == 0:
                 rhs = -G_op(K_dF_op(DbarF_grid.reshape(-1))).reshape(-1)
@@ -753,12 +987,51 @@ def finite_strain_solver_step_2d(
                 dFm, _ = sp.bicgstab(A_op, rhs, tol=tol_CG, maxiter=150)
             dF = dFm.reshape(ndim, ndim, nx, ny)
             
-            if i_NW == 0:
-                F_curr = F_curr + DbarF_grid + dF
-            else:
-                F_curr = F_curr + dF
+            dX = (DbarF_grid + dF) if i_NW == 0 else dF
+            
+            # Backtracking line search to enforce positive determinant and no NaNs
+            alpha = 1.0
+            for it_ls in range(8):
+                F_trial_step = F_curr + alpha * dX
                 
-            P, K4 = constitutive_hyperelastic_2d(F_curr, C4, I2, I4, I4rt, Fp=Fp)
+                # Check for J_elastic determinant positivity (J > 1e-4)
+                if Fp is not None:
+                    Fe_trial = np.einsum('ijxy,jkxy->ikxy', F_trial_step, Fp_inv, optimize=True)
+                else:
+                    Fe_trial = F_trial_step
+                
+                Je = Fe_trial[0, 0] * Fe_trial[1, 1] - Fe_trial[0, 1] * Fe_trial[1, 0]
+                if np.any(Je <= 1e-4) or np.any(np.isnan(Je)):
+                    alpha *= 0.5
+                    continue
+                
+                # Try computing stress and consistent tangent
+                try:
+                    P_t, K4_t, F33_t = constitutive_hyperelastic_2d(
+                        F_trial_step, C4, I2, I4, I4rt, Fp=Fp, 
+                        model_type=model_type, plane_mode=plane_mode, 
+                        A_m=A_m, B_m=B_m, C_m=C_m
+                    )
+                    
+                    if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
+                        alpha *= 0.5
+                        continue
+                        
+                    # Accept the step
+                    F_curr = F_trial_step
+                    P, K4, F33 = P_t, K4_t, F33_t
+                    break
+                except Exception:
+                    alpha *= 0.5
+            else:
+                # If backtracking failed, take a tiny step to try to escape
+                alpha_fallback = 0.02
+                F_curr = F_curr + alpha_fallback * dX
+                P, K4, F33 = constitutive_hyperelastic_2d(
+                    F_curr, C4, I2, I4, I4rt, Fp=Fp, 
+                    model_type=model_type, plane_mode=plane_mode, 
+                    A_m=A_m, B_m=B_m, C_m=C_m
+                )
             
             res_norm = np.linalg.norm(dFm) / (np.linalg.norm(F_curr) + 1e-20)
             if res_norm < tol_NW and i_NW > 0:
@@ -766,7 +1039,7 @@ def finite_strain_solver_step_2d(
         
         F_mac = F_curr.mean(axis=(2, 3))
         P_mac = P.mean(axis=(2, 3))
-        Sig_field = cauchy_from_P(P, F_curr)
+        Sig_field = cauchy_from_P(P, F_curr, F33=F33)
         Sig_mac = Sig_field.mean(axis=(2, 3))
         
         F_final = F_curr
@@ -786,6 +1059,10 @@ def finite_strain_solver_step_2d(
             
         i_drv, j_drv = driving_component
         d_F_mat = (stress_err - nu_avg * np.trace(stress_err) * np.eye(ndim)) / E_avg
+        # Clip the macro strain update to prevent runaway due to garbage stress in unconverged iterations
+        max_macro_update = 0.01
+        d_F_mat = np.clip(d_F_mat, -max_macro_update, max_macro_update)
+        
         for ii in range(ndim):
             for jj in range(ndim):
                 if not (P_mask[ii, jj] and ii == jj):
@@ -825,6 +1102,8 @@ def finite_strain_simulation_2d(
     checkpoint_path=None,
     vtk_interval="none",
     vtk_path=None,
+    model_type="svk",
+    A_m=0.0, B_m=0.0, C_m=0.0
 ):
     """
     Incremental 2D finite-strain simulation using the de Geus FFT Newton-CG method.
@@ -917,13 +1196,15 @@ def finite_strain_simulation_2d(
 
     # Incremental loading
     eps_steps = np.linspace(0.0, eps_target, n_steps + 1)
+    F_bar_init = None
 
     for s in range(n_steps + 1):
         eps_s = eps_steps[s]
 
         # Build target F̄ and stress masks for this step
         F_bar, F_mask, P_tgt, P_mask = build_finite_strain_bc(
-            driving_component, eps_s, mixed_targets, plane_mode
+            driving_component, eps_s, mixed_targets, plane_mode,
+            F_bar_initial=F_bar_init
         )
 
         F, P_field, Sig_field, K4, F_bar = finite_strain_solver_step_2d(
@@ -932,8 +1213,12 @@ def finite_strain_simulation_2d(
             E_avg=E.mean(), nu_avg=nu.mean(),
             tol_NW=tol_NW, tol_CG=tol_CG, max_NW=max_NW,
             tol_macro=tol_macro, max_iter_macro=max_iter_macro,
-            enable_console=enable_console
+            enable_console=enable_console,
+            model_type=model_type,
+            plane_mode=plane_mode,
+            A_m=A_m, B_m=B_m, C_m=C_m
         )
+        F_bar_init = F_bar
 
         F_mac = F.mean(axis=(2, 3))
         P_mac = P_field.mean(axis=(2, 3))
@@ -1048,11 +1333,15 @@ def finite_strain_simulation_2d(
 # ---------------------------------------------------------------------------
 
 def build_finite_strain_bc_3d(driving_component, eps_target_step,
-                              mixed_targets, ndim=3):
+                              mixed_targets, ndim=3, F_bar_initial=None):
     """
     Translate the standard MGKMC config keys into 3D finite-strain BC masks.
     """
-    F_bar    = np.eye(ndim)          # start from identity
+    if F_bar_initial is None:
+        F_bar = np.eye(ndim)          # start from identity
+    else:
+        F_bar = F_bar_initial.copy()
+        
     F_mask   = np.zeros((ndim, ndim), dtype=bool)
     P_target = np.zeros((ndim, ndim))
     P_mask   = np.zeros((ndim, ndim), dtype=bool)
@@ -1098,7 +1387,8 @@ def build_finite_strain_bc_3d(driving_component, eps_target_step,
 # ---------------------------------------------------------------------------
 
 def _newton_cg_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt,
-                       tol_NW=1e-5, tol_CG=1e-6, max_NW=20):
+                       tol_NW=1e-5, tol_CG=1e-6, max_NW=20,
+                       model_type="svk", A_m=0.0, B_m=0.0, C_m=0.0):
     """
     Run 3D Newton-CG iterations to enforce G : P(F) = 0.
     """
@@ -1108,7 +1398,7 @@ def _newton_cg_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt,
     DbarF      = F_bar - F.mean(axis=(2, 3, 4))
     DbarF_grid = np.einsum('ij,xyz->ijxyz', DbarF, np.ones((nx, ny, nz)))
 
-    P, K4 = constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt)
+    P, K4 = constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
 
     def G_op(A2):
         return _project_3d(A2, Ghat4)
@@ -1143,7 +1433,7 @@ def _newton_cg_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt,
         else:
             F = F + dF
 
-        P, K4 = constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt)
+        P, K4 = constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
 
         res_norm = np.linalg.norm(dFm) / (np.linalg.norm(F) + 1e-20)
         if res_norm < tol_NW and i_NW > 0:
@@ -1158,7 +1448,8 @@ def finite_strain_solver_step_3d(
     E_avg=100e9, nu_avg=0.3,
     tol_NW=1e-5, tol_CG=1e-6, max_NW=20,
     tol_macro=1e6, max_iter_macro=20,
-    enable_console=True
+    enable_console=True, model_type="svk",
+    A_m=0.0, B_m=0.0, C_m=0.0
 ):
     """
     Solves a single step of the finite strain problem in 3D, enforcing mixed BCs on F_bar.
@@ -1184,7 +1475,7 @@ def finite_strain_solver_step_3d(
         DbarF = F_bar_current - F_start.mean(axis=(2, 3, 4))
         DbarF_grid = np.einsum('ij,xyz->ijxyz', DbarF, np.ones((nx, ny, nz)))
         
-        P, K4 = constitutive_hyperelastic_3d(F_start, C4, I2, I4, I4rt, Fp=Fp)
+        P, K4 = constitutive_hyperelastic_3d(F_start, C4, I2, I4, I4rt, Fp=Fp, model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
         
         def G_op(A2):
             return _project_3d(A2, Ghat4)
@@ -1203,6 +1494,11 @@ def finite_strain_solver_step_3d(
         )
         
         F_curr = F_start.copy()
+        if Fp is not None:
+            Fp_inv = _invert_Fp_3d(Fp)
+        else:
+            Fp_inv = None
+
         for i_NW in range(max_NW):
             if i_NW == 0:
                 rhs = -G_op(K_dF_op(DbarF_grid.reshape(-1))).reshape(-1)
@@ -1215,12 +1511,53 @@ def finite_strain_solver_step_3d(
                 dFm, _ = sp.bicgstab(A_op, rhs, tol=tol_CG, maxiter=150)
             dF = dFm.reshape(ndim, ndim, nx, ny, nz)
             
-            if i_NW == 0:
-                F_curr = F_curr + DbarF_grid + dF
-            else:
-                F_curr = F_curr + dF
+            dX = (DbarF_grid + dF) if i_NW == 0 else dF
+            
+            # Backtracking line search to enforce positive determinant and no NaNs
+            alpha = 1.0
+            for it_ls in range(8):
+                F_trial_step = F_curr + alpha * dX
                 
-            P, K4 = constitutive_hyperelastic_3d(F_curr, C4, I2, I4, I4rt, Fp=Fp)
+                # Check for J_elastic determinant positivity (J > 1e-4)
+                if Fp is not None:
+                    Fe_trial = np.einsum('ijxyz,jkxyz->ikxyz', F_trial_step, Fp_inv, optimize=True)
+                else:
+                    Fe_trial = F_trial_step
+                
+                # Determinant of 3x3 tensor field
+                Je = Fe_trial[0,0]*(Fe_trial[1,1]*Fe_trial[2,2] - Fe_trial[1,2]*Fe_trial[2,1]) \
+                   - Fe_trial[0,1]*(Fe_trial[1,0]*Fe_trial[2,2] - Fe_trial[1,2]*Fe_trial[2,0]) \
+                   + Fe_trial[0,2]*(Fe_trial[1,0]*Fe_trial[2,1] - Fe_trial[1,1]*Fe_trial[2,0])
+                   
+                if np.any(Je <= 1e-4) or np.any(np.isnan(Je)):
+                    alpha *= 0.5
+                    continue
+                
+                # Try computing stress and consistent tangent
+                try:
+                    P_t, K4_t = constitutive_hyperelastic_3d(
+                        F_trial_step, C4, I2, I4, I4rt, Fp=Fp, 
+                        model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m
+                    )
+                    
+                    if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
+                        alpha *= 0.5
+                        continue
+                        
+                    # Accept the step
+                    F_curr = F_trial_step
+                    P, K4 = P_t, K4_t
+                    break
+                except Exception:
+                    alpha *= 0.5
+            else:
+                # If backtracking failed, take a tiny step to try to escape
+                alpha_fallback = 0.02
+                F_curr = F_curr + alpha_fallback * dX
+                P, K4 = constitutive_hyperelastic_3d(
+                    F_curr, C4, I2, I4, I4rt, Fp=Fp, 
+                    model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m
+                )
             
             res_norm = np.linalg.norm(dFm) / (np.linalg.norm(F_curr) + 1e-20)
             if res_norm < tol_NW and i_NW > 0:
@@ -1248,6 +1585,10 @@ def finite_strain_solver_step_3d(
             
         i_drv, j_drv = driving_component
         d_F_mat = (stress_err - nu_avg * np.trace(stress_err) * np.eye(ndim)) / E_avg
+        # Clip the macro strain update to prevent runaway due to garbage stress in unconverged iterations
+        max_macro_update = 0.01
+        d_F_mat = np.clip(d_F_mat, -max_macro_update, max_macro_update)
+        
         for ii in range(ndim):
             for jj in range(ndim):
                 if not (P_mask[ii, jj] and ii == jj):
@@ -1286,6 +1627,8 @@ def finite_strain_simulation_3d(
     checkpoint_path=None,
     vtk_interval="none",
     vtk_path=None,
+    model_type="svk",
+    A_m=0.0, B_m=0.0, C_m=0.0
 ):
     """
     Incremental 3D finite-strain simulation using Newton-CG.
@@ -1353,12 +1696,14 @@ def finite_strain_simulation_3d(
     F = np.einsum('ij,xyz->ijxyz', np.eye(ndim), np.ones((nx, ny, nz)))
 
     eps_steps = np.linspace(0.0, eps_target, n_steps + 1)
+    F_bar_init = None
 
     for s in range(n_steps + 1):
         eps_s = eps_steps[s]
 
         F_bar, F_mask, P_tgt, P_mask = build_finite_strain_bc_3d(
-            driving_component, eps_s, mixed_targets, ndim=ndim
+            driving_component, eps_s, mixed_targets, ndim=ndim,
+            F_bar_initial=F_bar_init
         )
 
         F, P_field, Sig_field, K4, F_bar = finite_strain_solver_step_3d(
@@ -1367,8 +1712,11 @@ def finite_strain_simulation_3d(
             E_avg=E.mean(), nu_avg=nu.mean(),
             tol_NW=tol_NW, tol_CG=tol_CG, max_NW=max_NW,
             tol_macro=tol_macro, max_iter_macro=max_iter_macro,
-            enable_console=enable_console
+            enable_console=enable_console,
+            model_type=model_type,
+            A_m=A_m, B_m=B_m, C_m=C_m
         )
+        F_bar_init = F_bar
 
         F_mac = F.mean(axis=(2, 3, 4))
         P_mac = P_field.mean(axis=(2, 3, 4))
