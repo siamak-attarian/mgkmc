@@ -8,7 +8,6 @@ from .kmc_simulator_functions import (
     compute_barrier_2d, find_unstable_2d, apply_flip_soa_2d, get_barrier_generator_2d
 )
 from .analysis.vtk import export_to_vtk
-from .finite_strain_simulator import eshelby_predictor_2d, eshelby_predictor_2d_batch
 
 class KmcSimulation2D:
     def __init__(self, nx, ny, M, gamma0, E_field, nu_field, pixel=1.0,
@@ -24,8 +23,7 @@ class KmcSimulation2D:
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
                  strain_assumption="small_strain", hyperelastic_model="svk",
-                 A_m=0.0, B_m=0.0, C_m=0.0,
-                 use_eshelby_predictor=True):
+                 A_m=0.0, B_m=0.0, C_m=0.0):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
@@ -126,7 +124,6 @@ class KmcSimulation2D:
 
         self.strain_assumption = strain_assumption
         self.hyperelastic_model = hyperelastic_model
-        self.use_eshelby_predictor = use_eshelby_predictor
         if self.strain_assumption == "finite_strain":
             self.fast_patching_enabled = False
             from .finite_strain_simulator import _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d
@@ -354,21 +351,7 @@ class KmcSimulation2D:
                     I_plus_C = np.eye(2) + C
                     det_I_plus_C = I_plus_C[0,0] * I_plus_C[1,1] - I_plus_C[0,1] * I_plus_C[1,0]
                     I_plus_C = I_plus_C / np.sqrt(max(1e-12, det_I_plus_C))
-                    Fp_new_xy = np.dot(I_plus_C, self.F_plastic[x, y])
-                    # Eshelby predictor: warm-start F_field[x,y] before updating Fp
-                    # Fe_old = F_old · Fp_old⁻¹  (elastic part, unchanged by the flip)
-                    # F_new  = Fe_old · Fp_new   (new total DG at the voxel)
-                    if self.use_eshelby_predictor:
-                        Fp_old = self.F_plastic[x, y]           # (2,2) old Fp
-                        det_fp = Fp_old[0,0]*Fp_old[1,1] - Fp_old[0,1]*Fp_old[1,0]
-                        det_fp_s = det_fp if abs(det_fp) > 1e-14 else (1e-14 if det_fp >= 0 else -1e-14)
-                        Fp_old_inv = np.array([[ Fp_old[1,1], -Fp_old[0,1]],
-                                               [-Fp_old[1,0],  Fp_old[0,0]]]) / det_fp_s
-                        Fe_old = self.F_field[x, y] @ Fp_old_inv
-                        F_new  = Fe_old @ Fp_new_xy
-                        if np.all(np.isfinite(F_new)):
-                            self.F_field[x, y] = F_new
-                    self.F_plastic[x, y] = Fp_new_xy
+                    self.F_plastic[x, y] = np.dot(I_plus_C, self.F_plastic[x, y])
                     
                     # Update softening locally
                     e11, e22, e12 = C[0,0], C[1,1], C[0,1]
@@ -537,19 +520,7 @@ class KmcSimulation2D:
                             I_plus_C = np.eye(2) + C
                             det_I_plus_C = I_plus_C[0,0] * I_plus_C[1,1] - I_plus_C[0,1] * I_plus_C[1,0]
                             I_plus_C = I_plus_C / np.sqrt(max(1e-12, det_I_plus_C))
-                            Fp_new_xy = np.dot(I_plus_C, self.F_plastic[x, y])
-                            # Eshelby predictor: warm-start F_field[x,y] before updating Fp
-                            if self.use_eshelby_predictor:
-                                Fp_old = self.F_plastic[x, y]       # (2,2) old Fp
-                                det_fp = Fp_old[0,0]*Fp_old[1,1] - Fp_old[0,1]*Fp_old[1,0]
-                                det_fp_s = det_fp if abs(det_fp) > 1e-14 else (1e-14 if det_fp >= 0 else -1e-14)
-                                Fp_old_inv = np.array([[ Fp_old[1,1], -Fp_old[0,1]],
-                                                       [-Fp_old[1,0],  Fp_old[0,0]]]) / det_fp_s
-                                Fe_old = self.F_field[x, y] @ Fp_old_inv
-                                F_new  = Fe_old @ Fp_new_xy
-                                if np.all(np.isfinite(F_new)):
-                                    self.F_field[x, y] = F_new
-                            self.F_plastic[x, y] = Fp_new_xy
+                            self.F_plastic[x, y] = np.dot(I_plus_C, self.F_plastic[x, y])
                             
                             e11, e22, e12 = C[0,0], C[1,1], C[0,1]
                             sum_sq = (e12**2) + (e22**2 + e11**2 + (e11 - e22)**2) / 6.0

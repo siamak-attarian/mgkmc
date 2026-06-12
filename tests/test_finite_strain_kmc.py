@@ -6,7 +6,6 @@ from mgkmc.kmc_simulator import KmcSimulation2D
 from mgkmc.aqs import ThermalSimulation
 
 def test_kmc_finite_strain_2d():
-    np.random.seed(42)   # fix seed for reproducibility
     print("\n--- Testing 2D KMC with Finite Strain ---")
     nx, ny = 8, 8
     M = 5
