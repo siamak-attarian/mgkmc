@@ -23,7 +23,7 @@ system:
   M: 20            # Number of shear orientations per voxel
   gamma0: 0.14     # Reference strain
   num_threads: 1   # Number of threads for pyfftw
-  solver: "al"     # Solver for finite strain paths: "al" (Augmented Lagrangian) or "newton_cg" (Newton-CG)
+  solver: "al"     # Solver for finite strain paths: "al" (Augmented Lagrangian), "newton_cg" (Newton-CG), or "dbfft" (Displacement-Based FFT)
 
 # Material Properties
 material:

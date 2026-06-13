@@ -311,6 +311,111 @@ def test_negative_strain_steps():
     print(f"Calculated steps: {calculated_n_steps} (expected: 75)")
     assert calculated_n_steps == 75
 
+def test_dbfft_vs_newton_cg_2d():
+    print("\n--- Testing 2D DBFFT vs Newton-CG ---")
+    nx, ny = 16, 16
+    pixel = 1.0
+    Lx, Ly = nx * pixel, ny * pixel
+    
+    np.random.seed(42)
+    E = np.ones((nx, ny)) * 70.0 * 1e9  # Pa
+    E[4:12, 4:12] = 68.0 * 1e9          # low contrast for stability of Newton-CG
+    nu = np.ones((nx, ny)) * 0.3
+    
+    from mgkmc.finite_strain_simulator import (
+        _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d,
+        finite_strain_solver_step_2d
+    )
+    
+    I2, I4, I4rt, I4s, II = _make_identity_tensors_2d(nx, ny)
+    Ghat4 = build_ghat4_2d(nx, ny, Lx, Ly)
+    C4 = build_C4_2d(E, nu, I4s, II, plane_mode="plane_strain")
+    
+    F_bar = np.array([[1.0005, 0.0],
+                      [0.0, 0.9995]])   # small strain step
+    P_target = np.zeros((2, 2))
+    P_mask = np.zeros((2, 2), dtype=bool)
+    
+    F_init = np.einsum('ij,xy->ijxy', np.eye(2), np.ones((nx, ny)))
+    
+    F_ncg, P_ncg, Sig_ncg, K4_ncg, _ = finite_strain_solver_step_2d(
+        F_init.copy(), F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
+        driving_component=(0, 0), P_target=P_target, P_mask=P_mask,
+        E_avg=E.mean(), nu_avg=nu.mean(),
+        tol_NW=1e-8, tol_CG=1e-9, max_NW=30,
+        solver="newton_cg", pixel=pixel
+    )
+    
+    F_dbfft, P_dbfft, Sig_dbfft, K4_dbfft, _ = finite_strain_solver_step_2d(
+        F_init.copy(), F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
+        driving_component=(0, 0), P_target=P_target, P_mask=P_mask,
+        E_avg=E.mean(), nu_avg=nu.mean(),
+        tol_NW=1e-8, tol_CG=1e-9, max_NW=30,
+        solver="dbfft", pixel=pixel
+    )
+    
+    diff_F = np.linalg.norm(F_dbfft - F_ncg) / np.linalg.norm(F_ncg)
+    diff_P = np.linalg.norm(P_dbfft - P_ncg) / np.linalg.norm(P_ncg)
+    
+    print(f"2D F relative diff: {diff_F:.4e}")
+    print(f"2D P relative diff: {diff_P:.4e}")
+    
+    assert diff_F < 1e-5
+    assert diff_P < 1e-2
+
+def test_dbfft_vs_newton_cg_3d():
+    print("\n--- Testing 3D DBFFT vs Newton-CG ---")
+    nx, ny, nz = 8, 8, 8
+    pixel = 1.0
+    Lx, Ly, Lz = nx * pixel, ny * pixel, nz * pixel
+    
+    np.random.seed(42)
+    E = np.ones((nx, ny, nz)) * 70.0 * 1e9  # Pa
+    E[2:6, 2:6, 2:6] = 68.0 * 1e9          # low contrast for stability of Newton-CG
+    nu = np.ones((nx, ny, nz)) * 0.3
+    
+    from mgkmc.finite_strain_simulator import (
+        _make_identity_tensors_3d, build_ghat4_3d, build_C4_3d,
+        finite_strain_solver_step_3d
+    )
+    
+    I2, I4, I4rt, I4s, II = _make_identity_tensors_3d(nx, ny, nz)
+    Ghat4 = build_ghat4_3d(nx, ny, nz, Lx, Ly, Lz)
+    C4 = build_C4_3d(E, nu, I4s, II)
+    
+    F_bar = np.array([[1.0005, 0.0, 0.0],
+                      [0.0, 0.9995, 0.0],
+                      [0.0, 0.0, 1.0]])   # small strain step
+    P_target = np.zeros((3, 3))
+    P_mask = np.zeros((3, 3), dtype=bool)
+    
+    F_init = np.einsum('ij,xyz->ijxyz', np.eye(3), np.ones((nx, ny, nz)))
+    
+    F_ncg, P_ncg, Sig_ncg, K4_ncg, _ = finite_strain_solver_step_3d(
+        F_init.copy(), F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
+        driving_component=(0, 0), P_target=P_target, P_mask=P_mask,
+        E_avg=E.mean(), nu_avg=nu.mean(),
+        tol_NW=1e-8, tol_CG=1e-9, max_NW=30,
+        solver="newton_cg", pixel=pixel
+    )
+    
+    F_dbfft, P_dbfft, Sig_dbfft, K4_dbfft, _ = finite_strain_solver_step_3d(
+        F_init.copy(), F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
+        driving_component=(0, 0), P_target=P_target, P_mask=P_mask,
+        E_avg=E.mean(), nu_avg=nu.mean(),
+        tol_NW=1e-8, tol_CG=1e-9, max_NW=30,
+        solver="dbfft", pixel=pixel
+    )
+    
+    diff_F = np.linalg.norm(F_dbfft - F_ncg) / np.linalg.norm(F_ncg)
+    diff_P = np.linalg.norm(P_dbfft - P_ncg) / np.linalg.norm(P_ncg)
+    
+    print(f"3D F relative diff: {diff_F:.4e}")
+    print(f"3D P relative diff: {diff_P:.4e}")
+    
+    assert diff_F < 1e-5
+    assert diff_P < 1e-2
+
 if __name__ == "__main__":
     test_kmc_finite_strain_2d()
     test_kmc_finite_strain_3d()
@@ -320,3 +425,5 @@ if __name__ == "__main__":
     test_mu_lambda_parameter_conversion()
     test_parse_material_property()
     test_negative_strain_steps()
+    test_dbfft_vs_newton_cg_2d()
+    test_dbfft_vs_newton_cg_3d()

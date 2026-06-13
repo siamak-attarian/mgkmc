@@ -257,7 +257,7 @@ class KmcSimulation2D:
                 model_type=self.hyperelastic_model,
                 plane_mode=self.plane_mode,
                 A_m=self.A_m, B_m=self.B_m, C_m=self.C_m,
-                solver=self.solver
+                solver=self.solver, pixel=self.pixel
             )
             
             self.F_field = np.einsum('ijxy->xyij', F_out)

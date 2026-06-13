@@ -267,7 +267,7 @@ class ThermalSimulation:
                 enable_console=False,
                 model_type=self.hyperelastic_model,
                 A_m=self.A_m, B_m=self.B_m, C_m=self.C_m,
-                solver=self.solver
+                solver=self.solver, pixel=self.pixel
             )
             
             self.F_field = np.einsum('ijxyz->xyzij', F_out)

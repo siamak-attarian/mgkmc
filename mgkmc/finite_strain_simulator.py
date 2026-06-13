@@ -623,7 +623,352 @@ def _project_3d(A2, Ghat4):
 
 
 # ---------------------------------------------------------------------------
+# Displacement-Based FFT (DBFFT) Helpers & Solvers
+# ---------------------------------------------------------------------------
+
+def _get_frequencies_2d(nx, ny, Lx, Ly):
+    """
+    Get 2D angular frequency vectors scaled by 2*pi, shape (2, nx, ny).
+    Zero out the Nyquist frequency for even grid sizes.
+    """
+    xi_x = 2.0 * np.pi * np.fft.fftfreq(nx, d=Lx/nx)
+    xi_y = 2.0 * np.pi * np.fft.fftfreq(ny, d=Ly/ny)
+    Xi_x, Xi_y = np.meshgrid(xi_x, xi_y, indexing='ij')
+    
+    if nx % 2 == 0:
+        Xi_x[Xi_x == -np.pi * nx / Lx] = 0.0
+    if ny % 2 == 0:
+        Xi_y[Xi_y == -np.pi * ny / Ly] = 0.0
+        
+    return np.stack([Xi_x, Xi_y], axis=0)
+
+
+def _get_frequencies_3d(nx, ny, nz, Lx, Ly, Lz):
+    """
+    Get 3D angular frequency vectors scaled by 2*pi, shape (3, nx, ny, nz).
+    Zero out the Nyquist frequency for even grid sizes.
+    """
+    xi_x = 2.0 * np.pi * np.fft.fftfreq(nx, d=Lx/nx)
+    xi_y = 2.0 * np.pi * np.fft.fftfreq(ny, d=Ly/ny)
+    xi_z = 2.0 * np.pi * np.fft.fftfreq(nz, d=Lz/nz)
+    Xi_x, Xi_y, Xi_z = np.meshgrid(xi_x, xi_y, xi_z, indexing='ij')
+    
+    if nx % 2 == 0:
+        Xi_x[Xi_x == -np.pi * nx / Lx] = 0.0
+    if ny % 2 == 0:
+        Xi_y[Xi_y == -np.pi * ny / Ly] = 0.0
+    if nz % 2 == 0:
+        Xi_z[Xi_z == -np.pi * nz / Lz] = 0.0
+        
+    return np.stack([Xi_x, Xi_y, Xi_z], axis=0)
+
+
+def _invert_matrix_field_2d(A):
+    """
+    Invert a 2x2 matrix field pointwise in Fourier space.
+    A shape: (2, 2, nx, ny)
+    """
+    det = A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0]
+    det_safe = np.where(np.abs(det) < 1e-14, 1.0, det)
+    
+    M_inv = np.zeros_like(A)
+    M_inv[0, 0] =  A[1, 1] / det_safe
+    M_inv[1, 1] =  A[0, 0] / det_safe
+    M_inv[0, 1] = -A[0, 1] / det_safe
+    M_inv[1, 0] = -A[1, 0] / det_safe
+    
+    M_inv[:, :, 0, 0] = 0.0
+    return M_inv
+
+
+def _invert_matrix_field_3d(A):
+    """
+    Invert a 3x3 matrix field pointwise in Fourier space.
+    A shape: (3, 3, nx, ny, nz)
+    """
+    det = (
+        A[0, 0] * (A[1, 1] * A[2, 2] - A[1, 2] * A[2, 1]) -
+        A[0, 1] * (A[1, 0] * A[2, 2] - A[1, 2] * A[2, 0]) +
+        A[0, 2] * (A[1, 0] * A[2, 1] - A[1, 1] * A[2, 0])
+    )
+    det_safe = np.where(np.abs(det) < 1e-14, 1.0, det)
+    
+    M_inv = np.zeros_like(A)
+    M_inv[0, 0] =  (A[1, 1] * A[2, 2] - A[1, 2] * A[2, 1]) / det_safe
+    M_inv[0, 1] = -(A[0, 1] * A[2, 2] - A[0, 2] * A[2, 1]) / det_safe
+    M_inv[0, 2] =  (A[0, 1] * A[1, 2] - A[0, 2] * A[1, 1]) / det_safe
+    
+    M_inv[1, 0] = -(A[1, 0] * A[2, 2] - A[1, 2] * A[2, 0]) / det_safe
+    M_inv[1, 1] =  (A[0, 0] * A[2, 2] - A[0, 2] * A[2, 0]) / det_safe
+    M_inv[1, 2] = -(A[0, 0] * A[1, 2] - A[0, 2] * A[1, 0]) / det_safe
+    
+    M_inv[2, 0] =  (A[1, 0] * A[2, 1] - A[1, 1] * A[2, 0]) / det_safe
+    M_inv[2, 1] = -(A[0, 0] * A[2, 1] - A[0, 1] * A[2, 0]) / det_safe
+    M_inv[2, 2] =  (A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0]) / det_safe
+    
+    M_inv[:, :, 0, 0, 0] = 0.0
+    return M_inv
+
+
+def _reconstruct_u_from_F_2d(F, F_bar, Xi):
+    nx, ny = F.shape[2], F.shape[3]
+    F_bar_grid = np.einsum('ij,xy->ijxy', F_bar, np.ones((nx, ny)))
+    grad_u = F - F_bar_grid
+    grad_u_hat = _fft2_tensor(grad_u)
+    
+    xi2 = np.sum(Xi**2, axis=0)
+    xi2_safe = np.where(xi2 < 1e-14, 1.0, xi2)
+    
+    u_hat = -1j * np.einsum('jxy,ijxy->ixy', Xi, grad_u_hat) / xi2_safe
+    u_hat[:, 0, 0] = 0.0
+    
+    return _ifft2_tensor(u_hat)
+
+
+def _reconstruct_u_from_F_3d(F, F_bar, Xi):
+    nx, ny, nz = F.shape[2], F.shape[3], F.shape[4]
+    F_bar_grid = np.einsum('ij,xyz->ijxyz', F_bar, np.ones((nx, ny, nz)))
+    grad_u = F - F_bar_grid
+    grad_u_hat = _fft3_tensor(grad_u)
+    
+    xi2 = np.sum(Xi**2, axis=0)
+    xi2_safe = np.where(xi2 < 1e-14, 1.0, xi2)
+    
+    u_hat = -1j * np.einsum('jxyz,ijxyz->ixyz', Xi, grad_u_hat) / xi2_safe
+    u_hat[:, 0, 0, 0] = 0.0
+    
+    return _ifft3_tensor(u_hat)
+
+
+def get_grad_u_2d(u, Xi):
+    u_hat = _fft2_tensor(u)
+    grad_u_hat = 1j * Xi[np.newaxis, :, :, :] * u_hat[:, np.newaxis, :, :]
+    return _ifft2_tensor(grad_u_hat)
+
+
+def get_grad_u_3d(u, Xi):
+    u_hat = _fft3_tensor(u)
+    grad_u_hat = 1j * Xi[np.newaxis, :, :, :, :] * u_hat[:, np.newaxis, :, :, :]
+    return _ifft3_tensor(grad_u_hat)
+
+
+def solve_dbfft_linear_system_2d(Xi, K4, M_inv, b_hat, tol_CG=1e-6, max_iter=150):
+    ndim, nx, ny = b_hat.shape
+    
+    def A_op_func(u_flat):
+        u_hat = u_flat.reshape(ndim, nx, ny)
+        grad_u_hat = 1j * Xi[np.newaxis, :, :, :] * u_hat[:, np.newaxis, :, :]
+        grad_u = _ifft2_tensor(grad_u_hat)
+        dP = _ddot42(K4, grad_u)
+        dP_hat = _fft2_tensor(dP)
+        div_P_hat = 1j * np.einsum('jxy,ijxy->ixy', Xi, dP_hat)
+        div_P_hat[:, 0, 0] = 0.0
+        return div_P_hat.reshape(-1)
+
+    def M_op_func(r_flat):
+        r_hat = r_flat.reshape(ndim, nx, ny)
+        z_hat = np.einsum('ijxy,jxy->ixy', M_inv, r_hat)
+        return z_hat.reshape(-1)
+
+    A_op = sp.LinearOperator(shape=(b_hat.size, b_hat.size), matvec=A_op_func, dtype='complex128')
+    M_op = sp.LinearOperator(shape=(b_hat.size, b_hat.size), matvec=M_op_func, dtype='complex128')
+    
+    b_flat = b_hat.reshape(-1)
+    try:
+        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, rtol=tol_CG, maxiter=max_iter)
+    except TypeError:
+        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, tol=tol_CG, maxiter=max_iter)
+        
+    return sol_flat.reshape(ndim, nx, ny), info
+
+
+def solve_dbfft_linear_system_3d(Xi, K4, M_inv, b_hat, tol_CG=1e-6, max_iter=150):
+    ndim, nx, ny, nz = b_hat.shape
+    
+    def A_op_func(u_flat):
+        u_hat = u_flat.reshape(ndim, nx, ny, nz)
+        grad_u_hat = 1j * Xi[np.newaxis, :, :, :, :] * u_hat[:, np.newaxis, :, :, :]
+        grad_u = _ifft3_tensor(grad_u_hat)
+        dP = _ddot42_3d(K4, grad_u)
+        dP_hat = _fft3_tensor(dP)
+        div_P_hat = 1j * np.einsum('jxyz,ijxyz->ixyz', Xi, dP_hat)
+        div_P_hat[:, 0, 0, 0] = 0.0
+        return div_P_hat.reshape(-1)
+
+    def M_op_func(r_flat):
+        r_hat = r_flat.reshape(ndim, nx, ny, nz)
+        z_hat = np.einsum('ijxyz,jxyz->ixyz', M_inv, r_hat)
+        return z_hat.reshape(-1)
+
+    A_op = sp.LinearOperator(shape=(b_hat.size, b_hat.size), matvec=A_op_func, dtype='complex128')
+    M_op = sp.LinearOperator(shape=(b_hat.size, b_hat.size), matvec=M_op_func, dtype='complex128')
+    
+    b_flat = b_hat.reshape(-1)
+    try:
+        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, rtol=tol_CG, maxiter=max_iter)
+    except TypeError:
+        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, tol=tol_CG, maxiter=max_iter)
+        
+    return sol_flat.reshape(ndim, nx, ny, nz), info
+
+
+def _dbfft_step_2d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
+                   tol=1e-5, tol_CG=1e-6, max_iter=20,
+                   model_type="svk", plane_mode="plane_strain",
+                   A_m=0.0, B_m=0.0, C_m=0.0):
+    nx, ny = F.shape[2], F.shape[3]
+    F_bar_grid = np.einsum('ij,xy->ijxy', F_bar, np.ones((nx, ny)))
+    u = _reconstruct_u_from_F_2d(F, F_bar, Xi)
+    
+    if Fp is not None:
+        det = Fp[0,0]*Fp[1,1] - Fp[0,1]*Fp[1,0]
+        det_s = np.where(np.abs(det) < 1e-14, 1e-14, det)
+        Fp_inv = np.zeros_like(Fp)
+        Fp_inv[0,0] =  Fp[1,1] / det_s
+        Fp_inv[1,1] =  Fp[0,0] / det_s
+        Fp_inv[0,1] = -Fp[0,1] / det_s
+        Fp_inv[1,0] = -Fp[1,0] / det_s
+    else:
+        Fp_inv = None
+        
+    for i_NW in range(max_iter):
+        grad_u = get_grad_u_2d(u, Xi)
+        F_curr = F_bar_grid + grad_u
+        
+        P, K4, F33 = constitutive_hyperelastic_2d(
+            F_curr, C4, I2, I4, I4rt, Fp=Fp,
+            model_type=model_type, plane_mode=plane_mode,
+            A_m=A_m, B_m=B_m, C_m=C_m)
+            
+        P_hat = _fft2_tensor(P)
+        b_hat = -1j * np.einsum('jxy,ijxy->ixy', Xi, P_hat)
+        
+        res_norm = np.linalg.norm(b_hat)
+        P_norm = np.linalg.norm(P)
+        rel_res = res_norm / (P_norm + 1e-20)
+        
+        if rel_res < tol and i_NW > 0:
+            return F_curr, P, K4, F33, i_NW + 1
+            
+        K_avg = K4.mean(axis=(-2, -1))
+        A_mat = np.einsum('jxy,ijlk,lxy->ikxy', Xi, K_avg, Xi)
+        M_inv = _invert_matrix_field_2d(A_mat)
+        
+        du_hat, _ = solve_dbfft_linear_system_2d(Xi, K4, M_inv, b_hat, tol_CG=tol_CG)
+        du = _ifft2_tensor(du_hat)
+        
+        alpha = 1.0
+        converged_constitutive = False
+        for _ in range(8):
+            u_trial = u + alpha * du
+            grad_u_trial = get_grad_u_2d(u_trial, Xi)
+            F_trial = F_bar_grid + grad_u_trial
+            Je = F_trial[0,0]*F_trial[1,1] - F_trial[0,1]*F_trial[1,0]
+            if np.any(Je <= 1e-4) or np.any(np.isnan(Je)):
+                alpha *= 0.5
+                continue
+            try:
+                P_t, K4_t, F33_t = constitutive_hyperelastic_2d(
+                    F_trial, C4, I2, I4, I4rt, Fp=Fp,
+                    model_type=model_type, plane_mode=plane_mode,
+                    A_m=A_m, B_m=B_m, C_m=C_m)
+                if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
+                    alpha *= 0.5
+                    continue
+                u = u_trial
+                converged_constitutive = True
+                break
+            except Exception:
+                alpha *= 0.5
+        if not converged_constitutive:
+            u = u + 0.05 * du
+            
+    grad_u = get_grad_u_2d(u, Xi)
+    F_curr = F_bar_grid + grad_u
+    P, K4, F33 = constitutive_hyperelastic_2d(
+        F_curr, C4, I2, I4, I4rt, Fp=Fp,
+        model_type=model_type, plane_mode=plane_mode,
+        A_m=A_m, B_m=B_m, C_m=C_m)
+    return F_curr, P, K4, F33, max_iter
+
+
+def _dbfft_step_3d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
+                   tol=1e-5, tol_CG=1e-6, max_iter=20,
+                   model_type="svk", A_m=0.0, B_m=0.0, C_m=0.0):
+    nx, ny, nz = F.shape[2], F.shape[3], F.shape[4]
+    F_bar_grid = np.einsum('ij,xyz->ijxyz', F_bar, np.ones((nx, ny, nz)))
+    u = _reconstruct_u_from_F_3d(F, F_bar, Xi)
+    
+    if Fp is not None:
+        Fp_inv = _invert_Fp_3d(Fp)
+    else:
+        Fp_inv = None
+        
+    for i_NW in range(max_iter):
+        grad_u = get_grad_u_3d(u, Xi)
+        F_curr = F_bar_grid + grad_u
+        
+        P, K4 = constitutive_hyperelastic_3d(
+            F_curr, C4, I2, I4, I4rt, Fp=Fp,
+            model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
+            
+        P_hat = _fft3_tensor(P)
+        b_hat = -1j * np.einsum('jxyz,ijxyz->ixyz', Xi, P_hat)
+        
+        res_norm = np.linalg.norm(b_hat)
+        P_norm = np.linalg.norm(P)
+        rel_res = res_norm / (P_norm + 1e-20)
+        
+        if rel_res < tol and i_NW > 0:
+            return F_curr, P, K4, i_NW + 1
+            
+        K_avg = K4.mean(axis=(-3, -2, -1))
+        A_mat = np.einsum('jxyz,ijlk,lxyz->ikxyz', Xi, K_avg, Xi)
+        M_inv = _invert_matrix_field_3d(A_mat)
+        
+        du_hat, _ = solve_dbfft_linear_system_3d(Xi, K4, M_inv, b_hat, tol_CG=tol_CG)
+        du = _ifft3_tensor(du_hat)
+        
+        alpha = 1.0
+        converged_constitutive = False
+        for _ in range(8):
+            u_trial = u + alpha * du
+            grad_u_trial = get_grad_u_3d(u_trial, Xi)
+            F_trial = F_bar_grid + grad_u_trial
+            Je = (
+                F_trial[0, 0] * (F_trial[1, 1] * F_trial[2, 2] - F_trial[1, 2] * F_trial[2, 1]) -
+                F_trial[0, 1] * (F_trial[1, 0] * F_trial[2, 2] - F_trial[1, 2] * F_trial[2, 0]) +
+                F_trial[0, 2] * (F_trial[1, 0] * F_trial[2, 1] - F_trial[1, 1] * F_trial[2, 0])
+            )
+            if np.any(Je <= 1e-4) or np.any(np.isnan(Je)):
+                alpha *= 0.5
+                continue
+            try:
+                P_t, K4_t = constitutive_hyperelastic_3d(
+                    F_trial, C4, I2, I4, I4rt, Fp=Fp,
+                    model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
+                if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
+                    alpha *= 0.5
+                    continue
+                u = u_trial
+                converged_constitutive = True
+                break
+            except Exception:
+                alpha *= 0.5
+        if not converged_constitutive:
+            u = u + 0.05 * du
+            
+    grad_u = get_grad_u_3d(u, Xi)
+    F_curr = F_bar_grid + grad_u
+    P, K4 = constitutive_hyperelastic_3d(
+        F_curr, C4, I2, I4, I4rt, Fp=Fp,
+        model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
+    return F_curr, P, K4, max_iter
+
+
+# ---------------------------------------------------------------------------
 # Elastic stiffness tensor C4 in 3D
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
 def build_C4_3d(E_field, nu_field, I4s, II):
@@ -1103,7 +1448,7 @@ def finite_strain_solver_step_2d(
     tol_macro=1e6, max_iter_macro=20,
     enable_console=True, model_type="svk", plane_mode="plane_strain",
     A_m=0.0, B_m=0.0, C_m=0.0,
-    solver="al"
+    solver="al", pixel=1.0
 ):
     """
     Solves a single step of the finite strain problem in 2D, enforcing mixed BCs on F_bar.
@@ -1111,9 +1456,10 @@ def finite_strain_solver_step_2d(
 
     Parameters
     ----------
-    solver : 'al' (default) or 'newton_cg'
+    solver : 'al' (default), 'newton_cg', or 'dbfft'
         'al'        — Augmented Lagrangian (robust, fixed reference stiffness).
         'newton_cg' — Original Newton-CG (faster per iteration, less robust).
+        'dbfft'     — Displacement-Based FFT solver (extremely robust).
     """
     ndim = 2
     nx, ny = F.shape[2], F.shape[3]
@@ -1133,11 +1479,19 @@ def finite_strain_solver_step_2d(
 
     for it_mac in range(max_iter_macro):
 
-        # ---- Inner solve: AL or Newton-CG ----
+        # ---- Inner solve: AL, DBFFT, or Newton-CG ----
         if solver == "al":
             F_curr, P, K4, F33, _nitr = _al_step_2d(
                 F_start.copy(), F_bar_current, Ghat4, C4, I2, I4, I4rt, Fp=Fp,
                 tol=tol_NW, max_iter=max_NW,
+                model_type=model_type, plane_mode=plane_mode,
+                A_m=A_m, B_m=B_m, C_m=C_m)
+        elif solver == "dbfft":
+            Lx, Ly = nx * pixel, ny * pixel
+            Xi = _get_frequencies_2d(nx, ny, Lx, Ly)
+            F_curr, P, K4, F33, _nitr = _dbfft_step_2d(
+                F_start.copy(), F_bar_current, Xi, C4, I2, I4, I4rt, Fp=Fp,
+                tol=tol_NW, tol_CG=tol_CG, max_iter=max_NW,
                 model_type=model_type, plane_mode=plane_mode,
                 A_m=A_m, B_m=B_m, C_m=C_m)
         else:
@@ -1396,7 +1750,7 @@ def finite_strain_simulation_2d(
             model_type=model_type,
             plane_mode=plane_mode,
             A_m=A_m, B_m=B_m, C_m=C_m,
-            solver=solver
+            solver=solver, pixel=pixel
         )
         F_bar_init = F_bar
 
@@ -1630,7 +1984,7 @@ def finite_strain_solver_step_3d(
     tol_macro=1e6, max_iter_macro=20,
     enable_console=True, model_type="svk",
     A_m=0.0, B_m=0.0, C_m=0.0,
-    solver="al"
+    solver="al", pixel=1.0
 ):
     """
     Solves a single step of the finite strain problem in 3D, enforcing mixed BCs on F_bar.
@@ -1638,7 +1992,7 @@ def finite_strain_solver_step_3d(
 
     Parameters
     ----------
-    solver : 'al' (default) or 'newton_cg'
+    solver : 'al' (default), 'newton_cg', or 'dbfft'
     """
     ndim = 3
     nx, ny, nz = F.shape[2], F.shape[3], F.shape[4]
@@ -1658,11 +2012,18 @@ def finite_strain_solver_step_3d(
 
     for it_mac in range(max_iter_macro):
 
-        # ---- Inner solve: AL or Newton-CG ----
+        # ---- Inner solve: AL, DBFFT, or Newton-CG ----
         if solver == "al":
             F_curr, P, K4, _nitr = _al_step_3d(
                 F_start.copy(), F_bar_current, Ghat4, C4, I2, I4, I4rt, Fp=Fp,
                 tol=tol_NW, max_iter=max_NW,
+                model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
+        elif solver == "dbfft":
+            Lx, Ly, Lz = nx * pixel, ny * pixel, nz * pixel
+            Xi = _get_frequencies_3d(nx, ny, nz, Lx, Ly, Lz)
+            F_curr, P, K4, _nitr = _dbfft_step_3d(
+                F_start.copy(), F_bar_current, Xi, C4, I2, I4, I4rt, Fp=Fp,
+                tol=tol_NW, tol_CG=tol_CG, max_iter=max_NW,
                 model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
         else:
             # --- Original Newton-CG path ---
@@ -1880,7 +2241,7 @@ def finite_strain_simulation_3d(
             enable_console=enable_console,
             model_type=model_type,
             A_m=A_m, B_m=B_m, C_m=C_m,
-            solver=solver
+            solver=solver, pixel=pixel
         )
         F_bar_init = F_bar
 
