@@ -366,7 +366,7 @@ class KmcSimulation2D:
                 time_backup = self.time
 
                 success = False
-                for N in range(2, 6):
+                for N in range(2, 21):
                     self.F_plastic = F_plastic_backup.copy()
                     self.F_field = F_field_backup.copy()
                     self.sig_field = sig_field_backup.copy()
@@ -600,7 +600,7 @@ class KmcSimulation2D:
                             time_backup = self.time
 
                             success = False
-                            for N in range(2, 6):
+                            for N in range(2, 21):
                                 self.F_plastic = F_plastic_backup.copy()
                                 self.F_field = F_field_backup.copy()
                                 self.sig_field = sig_field_backup.copy()
