@@ -7,6 +7,7 @@ from mgkmc.aqs import ThermalSimulation
 
 def test_kmc_finite_strain_2d():
     print("\n--- Testing 2D KMC with Finite Strain ---")
+    np.random.seed(42)
     nx, ny = 8, 8
     M = 5
     gamma0 = 0.1
@@ -31,7 +32,8 @@ def test_kmc_finite_strain_2d():
         plane_mode="plane_strain",
         nu0=1e11,
         barrier_generator="gaussian",
-        barrier_kwargs={"mean": 2.2, "std": 0.01}
+        barrier_kwargs={"mean": 2.2, "std": 0.01},
+        solver="newton_cg"
     )
     
     # Run simulation

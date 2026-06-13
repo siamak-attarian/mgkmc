@@ -14,6 +14,7 @@ system:
   dimensionality: "2d" # Options: "2d" or "3d"
   plane_mode: "plane_strain" # Options: "plane_strain" or "plane_stress" (ignored if not 2d)
   strain_assumption: "finite_strain" # Options: "small_strain" or "finite_strain"
+  hyperelastic_model: "svk"          # Options: "svk" or "neo_hookean" (ignored if small_strain)
   3d_barriers: false                 # Enable fully 3D isotropic STZ eigenstrain directions (default: false)
   nx: 32
   ny: 32
@@ -22,6 +23,7 @@ system:
   M: 20            # Number of shear orientations per voxel
   gamma0: 0.14     # Reference strain
   num_threads: 1   # Number of threads for pyfftw
+  solver: "al"     # Solver for finite strain paths: "al" (Augmented Lagrangian) or "newton_cg" (Newton-CG)
 
 # Material Properties
 material:
@@ -31,6 +33,9 @@ material:
   nu:
     mode: "constant"
     value: 0.3     # Poisson's ratio
+  A: -100.0       # Third-order constant A (GPa)
+  B: -100.0       # Third-order constant B (GPa)
+  C: -100.0       # Third-order constant C (GPa)
 
 # Physics & Softening
 physics:

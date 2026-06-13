@@ -42,7 +42,8 @@ class ThermalSimulation:
                  strain_assumption="small_strain",
                  use_3d_barriers=False,
                  hyperelastic_model="svk",
-                 A_m=0.0, B_m=0.0, C_m=0.0
+                 A_m=0.0, B_m=0.0, C_m=0.0,
+                 solver="al"
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -173,6 +174,7 @@ class ThermalSimulation:
         self.A_m = A_m
         self.B_m = B_m
         self.C_m = C_m
+        self.solver = solver
         if self.strain_assumption == "finite_strain":
             self.fast_patching_enabled = False
             from .finite_strain_simulator import _make_identity_tensors_3d, build_ghat4_3d, build_C4_3d
@@ -264,7 +266,8 @@ class ThermalSimulation:
                 E_avg=self.E_field.mean(), nu_avg=self.nu_field.mean(),
                 enable_console=False,
                 model_type=self.hyperelastic_model,
-                A_m=self.A_m, B_m=self.B_m, C_m=self.C_m
+                A_m=self.A_m, B_m=self.B_m, C_m=self.C_m,
+                solver=self.solver
             )
             
             self.F_field = np.einsum('ijxyz->xyzij', F_out)

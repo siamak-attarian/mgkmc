@@ -23,12 +23,13 @@ class KmcSimulation2D:
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
                  strain_assumption="small_strain", hyperelastic_model="svk",
-                 A_m=0.0, B_m=0.0, C_m=0.0):
+                 A_m=0.0, B_m=0.0, C_m=0.0, solver="al"):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
         self.pixel, self.volume = pixel, pixel**3 # 3D STZ volume per paper Eq.12
         self.output_dir = output_dir
+        self.solver = solver
         if not os.path.exists(output_dir): os.makedirs(output_dir)
 
         # Physics params
@@ -255,7 +256,8 @@ class KmcSimulation2D:
                 enable_console=False,
                 model_type=self.hyperelastic_model,
                 plane_mode=self.plane_mode,
-                A_m=self.A_m, B_m=self.B_m, C_m=self.C_m
+                A_m=self.A_m, B_m=self.B_m, C_m=self.C_m,
+                solver=self.solver
             )
             
             self.F_field = np.einsum('ijxy->xyij', F_out)

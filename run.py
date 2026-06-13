@@ -71,6 +71,7 @@ def main():
     hyperelastic_model = sys_conf.get('hyperelastic_model', 'svk').lower()
     nx, ny, nz = sys_conf['nx'], sys_conf['ny'], sys_conf.get('nz', 1)
     use_3d_barriers = sys_conf.get('3d_barriers', False)
+    solver = sys_conf.get('solver', 'al').lower()
     
     shape = (nx, ny, nz) if dimensionality == '3d' else (nx, ny)
     
@@ -224,7 +225,8 @@ def main():
             hyperelastic_model=hyperelastic_model,
             A_m=A_val,
             B_m=B_val,
-            C_m=C_val
+            C_m=C_val,
+            solver=solver
         )
     else:
         print("Initializing 3D ThermalSimulation environment...")
@@ -275,7 +277,8 @@ def main():
             hyperelastic_model=hyperelastic_model,
             A_m=A_val,
             B_m=B_val,
-            C_m=C_val
+            C_m=C_val,
+            solver=solver
         )
 
     # ---------------------------------------------------------
@@ -385,7 +388,8 @@ def main():
                         model_type=hyperelastic_model,
                         A_m=A_val,
                         B_m=B_val,
-                        C_m=C_val
+                        C_m=C_val,
+                        solver=solver
                     )
 
                 print(f"2D Finite-Strain simulation completed. "
@@ -473,7 +477,8 @@ def main():
                         model_type=hyperelastic_model,
                         A_m=A_val,
                         B_m=B_val,
-                        C_m=C_val
+                        C_m=C_val,
+                        solver=solver
                     )
 
                 print(f"3D Finite-Strain simulation completed. Logs written to {out_dir}.")

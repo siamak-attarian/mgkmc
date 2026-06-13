@@ -305,22 +305,63 @@ def run_profile():
     plane_mode = sys_conf.get('plane_mode', 'plane_strain').lower()
     nx, ny = sys_conf['nx'], sys_conf['ny']
     
-    mat_conf = config['material']
-    E_field = generate_field(
-        mat_conf['E']['mode'], 
-        (nx, ny), 
-        constant_val=mat_conf['E'].get('value', 70.0),
-        params=mat_conf['E'].get('parameters', {})
-    )
-    nu_field = generate_field(
-        mat_conf['nu']['mode'], 
-        (nx, ny), 
-        constant_val=mat_conf['nu'].get('value', 0.3),
-        params=mat_conf['nu'].get('parameters', {})
-    )
+    # Helper to parse material property that could be a dictionary or a float
+    def parse_material_property(config_prop, default_val):
+        if config_prop is None:
+            return "constant", default_val, {}
+        if isinstance(config_prop, dict):
+            mode = config_prop.get('mode', 'constant')
+            val = config_prop.get('value', default_val)
+            params = config_prop.get('parameters', {})
+            return mode, val, params
+        else:
+            return "constant", float(config_prop), {}
 
-    if E_field.mean() < 1e6:
-        E_field = E_field * 1e9
+    mat_conf = config['material']
+    if 'mu' in mat_conf and 'lambda' in mat_conf:
+        mu_mode, mu_val, mu_params = parse_material_property(mat_conf.get('mu'), 26.92)
+        mu_field = generate_field(
+            mu_mode,
+            (nx, ny),
+            constant_val=mu_val,
+            params=mu_params
+        )
+        lambda_mode, lambda_val, lambda_params = parse_material_property(mat_conf.get('lambda'), 40.38)
+        lambda_field = generate_field(
+            lambda_mode,
+            (nx, ny),
+            constant_val=lambda_val,
+            params=lambda_params
+        )
+        # Scale to Pa if supplied in GPa
+        if mu_field.mean() < 1e6:
+            mu_field = mu_field * 1e9
+        if lambda_field.mean() < 1e6:
+            lambda_field = lambda_field * 1e9
+
+        # Calculate E_field and nu_field from mu_field and lambda_field
+        denom = lambda_field + mu_field
+        denom_safe = np.where(denom == 0.0, 1e-20, denom)
+        E_field = mu_field * (3.0 * lambda_field + 2.0 * mu_field) / denom_safe
+        nu_field = lambda_field / (2.0 * denom_safe)
+    else:
+        E_mode, E_val, E_params = parse_material_property(mat_conf.get('E'), 70.0)
+        E_field = generate_field(
+            E_mode, 
+            (nx, ny), 
+            constant_val=E_val,
+            params=E_params
+        )
+        nu_mode, nu_val, nu_params = parse_material_property(mat_conf.get('nu'), 0.3)
+        nu_field = generate_field(
+            nu_mode, 
+            (nx, ny), 
+            constant_val=nu_val,
+            params=nu_params
+        )
+
+        if E_field.mean() < 1e6:
+            E_field = E_field * 1e9
 
     phys_conf = config.get('physics', {})
     dyn_conf = config.get('dynamics', {})
@@ -373,7 +414,7 @@ def run_profile():
     loading_conf = config.get('loading', {})
     eps_target = float(loading_conf.get('eps_target', 0.001))
     step_size = float(loading_conf.get('step_size', 0.0001))
-    calculated_n_steps = int(eps_target / step_size)
+    calculated_n_steps = int(abs(eps_target) / abs(step_size))
 
     print(f"Starting simulation run for {calculated_n_steps} steps...")
     t_start = time.perf_counter()
