@@ -459,83 +459,167 @@ class ThermalSimulation:
                 flipped_indices.append((ux, uy, uz, um))
                 
                 C = self.catalog[ux,uy,uz,um].copy()
-                if self.strain_assumption == "finite_strain":
-                    I_plus_C = np.eye(3) + C
-                    det_I_plus_C = np.linalg.det(I_plus_C)
-                    I_plus_C = I_plus_C / (max(1e-12, det_I_plus_C)**(1.0/3.0))
-                    self.F_plastic[ux, uy, uz] = np.dot(I_plus_C, self.F_plastic[ux, uy, uz])
-                    
-                    # Update softening locally
-                    e11, e22, e33 = C[0,0], C[1,1], C[2,2]
-                    e12, e13, e23 = C[0,1], C[0,2], C[1,2]
-                    sum_sq = (e12**2 + e23**2 + e13**2) + ((e22 - e33)**2 + (e33 - e11)**2 + (e11 - e22)**2) / 6.0
-                    
-                    gp_new = self.soft_prop[ux,uy,uz,0] + self.jp * sum_sq
-                    if self.softening_cap > 0 and gp_new > self.softening_cap: gp_new = self.softening_cap
-                    self.soft_prop[ux,uy,uz,0] = gp_new
-                    self.soft_prop[ux,uy,uz,1] = self.jt * sum_sq
-                    self.last_event_time[ux,uy,uz] = self.time
-                    
-                    if self.neighbor_softening_fraction > 0.0:
-                        nx, ny, nz = self.grid_shape
-                        for dx in (-1, 0, 1):
-                            for dy in (-1, 0, 1):
-                                for dz in (-1, 0, 1):
-                                    if dx == 0 and dy == 0 and dz == 0: continue
-                                    nx_n = (ux + dx + nx) % nx
-                                    ny_n = (uy + dy + ny) % ny
-                                    nz_n = (uz + dz + nz) % nz
-                                    gp_n_new = self.soft_prop[nx_n, ny_n, nz_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
-                                    if self.softening_cap > 0 and gp_n_new > self.softening_cap: gp_n_new = self.softening_cap
-                                    self.soft_prop[nx_n, ny_n, nz_n, 0] = gp_n_new
-                                    self.soft_prop[nx_n, ny_n, nz_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
-                else:
+            if self.strain_assumption == "finite_strain":
+                F_plastic_backup = self.F_plastic.copy()
+                F_field_backup = self.F_field.copy()
+                sig_field_backup = self.sig_field.copy()
+                eps_field_backup = self.eps_field.copy()
+                F_macro_backup = self.F_macro.copy()
+                eps_macro_backup = self.eps_macro.copy()
+                soft_prop_backup = self.soft_prop.copy()
+                last_event_time_backup = self.last_event_time.copy()
+                prev_strain_dir_backup = self.prev_strain_dir.copy()
+                catalog_backup = self.catalog.copy()
+                Q0_backup = self.Q0.copy()
+                Tlocal_backup = self.Tlocal.copy()
+                time_backup = self.time
+
+                success = False
+                for N in range(2, 6):
+                    self.F_plastic = F_plastic_backup.copy()
+                    self.F_field = F_field_backup.copy()
+                    self.sig_field = sig_field_backup.copy()
+                    self.eps_field = eps_field_backup.copy()
+                    self.F_macro = F_macro_backup.copy()
+                    self.eps_macro = eps_macro_backup.copy()
+                    self.soft_prop = soft_prop_backup.copy()
+                    self.last_event_time = last_event_time_backup.copy()
+                    self.prev_strain_dir = prev_strain_dir_backup.copy()
+                    self.catalog = catalog_backup.copy()
+                    self.Q0 = Q0_backup.copy()
+                    self.Tlocal = Tlocal_backup.copy()
+                    self.time = time_backup
+
+                    try:
+                        for step_idx in range(1, N + 1):
+                            for ux, uy, uz, um in flipped_indices:
+                                C = self.catalog[ux, uy, uz, um].copy()
+                                C_sub = C / N
+                                I_plus_C_sub = np.eye(3) + C_sub
+                                det_I_plus_C_sub = np.linalg.det(I_plus_C_sub)
+                                I_plus_C_sub = I_plus_C_sub / (max(1e-12, det_I_plus_C_sub)**(1.0/3.0))
+                                self.F_plastic[ux, uy, uz] = np.dot(I_plus_C_sub, self.F_plastic[ux, uy, uz])
+
+                                if step_idx == N:
+                                    e11, e22, e33 = C[0,0], C[1,1], C[2,2]
+                                    e12, e13, e23 = C[0,1], C[0,2], C[1,2]
+                                    sum_sq = (e12**2 + e23**2 + e13**2) + ((e22 - e33)**2 + (e33 - e11)**2 + (e11 - e22)**2) / 6.0
+                                    
+                                    gp_new = self.soft_prop[ux, uy, uz, 0] + self.jp * sum_sq
+                                    if self.softening_cap > 0 and gp_new > self.softening_cap:
+                                        gp_new = self.softening_cap
+                                    self.soft_prop[ux, uy, uz, 0] = gp_new
+                                    self.soft_prop[ux, uy, uz, 1] = self.jt * sum_sq
+                                    self.last_event_time[ux, uy, uz] = self.time
+
+                                    if self.neighbor_softening_fraction > 0.0:
+                                        nx, ny, nz = self.grid_shape
+                                        for dx in (-1, 0, 1):
+                                            for dy in (-1, 0, 1):
+                                                for dz in (-1, 0, 1):
+                                                    if dx == 0 and dy == 0 and dz == 0: continue
+                                                    nx_n = (ux + dx + nx) % nx
+                                                    ny_n = (uy + dy + ny) % ny
+                                                    nz_n = (uz + dz + nz) % nz
+                                                    gp_n_new = self.soft_prop[nx_n, ny_n, nz_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
+                                                    if self.softening_cap > 0 and gp_n_new > self.softening_cap:
+                                                        gp_n_new = self.softening_cap
+                                                    self.soft_prop[nx_n, ny_n, nz_n, 0] = gp_n_new
+                                                    self.soft_prop[nx_n, ny_n, nz_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+
+                                    self.prev_strain_dir[ux, uy, uz] = C
+
+                                    if self.enable_thermal:
+                                        DeltaHeat = np.sum(self.sig_field[ux, uy, uz] * C)
+                                        delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                                        self.Tlocal[ux, uy, uz] += delta_T
+                                        if self.temperature_cap > 0:
+                                            self.Tlocal[ux, uy, uz] = min(self.Tlocal[ux, uy, uz], self.temperature_cap)
+
+                                    if self.redraw_directions or self.redraw_barriers:
+                                        if self.redraw_directions:
+                                            if self.use_3d_barriers:
+                                                self.catalog[ux, uy, uz] = stz_catalog_glass_3d(self.M, self.gamma0)
+                                            else:
+                                                self.catalog[ux, uy, uz] = stz_catalog_glass(self.M, self.gamma0)
+                                        if self.redraw_barriers:
+                                            self.Q0[ux, uy, uz] = self.barrier_generator((self.M,))
+                                    else:
+                                        if self.use_3d_barriers:
+                                            self.catalog[ux, uy, uz, um] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                                        else:
+                                            self.catalog[ux, uy, uz, um] = stz_catalog_glass(1, self.gamma0)[0]
+                                        self.Q0[ux, uy, uz, um] = self.barrier_generator((1,))[0]
+
+                                    if track_cascades:
+                                        self.flip_event_history.append((int(global_step), int(local_step), int(ux), int(uy), int(uz), int(um)))
+
+                            if step_idx == N:
+                                dt_cascade = 0.0
+                                if self.cascade_timing == "single":
+                                    dt_cascade = 1.0 / self.nu0
+                                elif self.cascade_timing == "per_flip":
+                                    dt_cascade = len(flipped_indices) / self.nu0
+                                
+                                if dt_cascade > 0:
+                                    self.time += dt_cascade
+                                    self.heat_conducting_3d(dt_cascade)
+                                    if strain_unit_tensor is not None:
+                                        self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+
+                            self.update_stresses()
+                        
+                        success = True
+                        break
+                    except ValueError as e:
+                        print(f"Warning: sub-stepping with N={N} failed: {e}. Trying N={N+1}...")
+                
+                if not success:
+                    import sys
+                    sys.exit("Simulation aborted: Mechanical solver failed to converge under sub-stepping.")
+            else:
+                for ux, uy, uz, um in flipped_indices:
                     apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
                                    self.catalog, ux, uy, uz, um, self.time, 
                                    self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
-                self.prev_strain_dir[ux,uy,uz] = C
-                
-                if self.enable_thermal:
-                    DeltaHeat = np.sum(self.sig_field[ux, uy, uz] * C)
-                    delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
-                    self.Tlocal[ux, uy, uz] += delta_T
-                    if self.temperature_cap > 0:
-                        self.Tlocal[ux, uy, uz] = min(self.Tlocal[ux, uy, uz], self.temperature_cap)
+                    self.prev_strain_dir[ux,uy,uz] = self.catalog[ux,uy,uz,um].copy()
+                    
+                    if self.enable_thermal:
+                        DeltaHeat = np.sum(self.sig_field[ux, uy, uz] * self.catalog[ux, uy, uz, um])
+                        delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                        self.Tlocal[ux, uy, uz] += delta_T
+                        if self.temperature_cap > 0:
+                            self.Tlocal[ux, uy, uz] = min(self.Tlocal[ux, uy, uz], self.temperature_cap)
 
-                if self.redraw_directions or self.redraw_barriers:
-                    if self.redraw_directions:
-                        if self.use_3d_barriers:
-                            self.catalog[ux,uy,uz] = stz_catalog_glass_3d(self.M, self.gamma0)
-                        else:
-                            self.catalog[ux,uy,uz] = stz_catalog_glass(self.M, self.gamma0)
-                    if self.redraw_barriers:
-                        self.Q0[ux,uy,uz] = self.barrier_generator((self.M,))
-                else:
-                    if self.use_3d_barriers:
-                        self.catalog[ux,uy,uz,um] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                    if self.redraw_directions or self.redraw_barriers:
+                        if self.redraw_directions:
+                            if self.use_3d_barriers:
+                                self.catalog[ux,uy,uz] = stz_catalog_glass_3d(self.M, self.gamma0)
+                            else:
+                                self.catalog[ux,uy,uz] = stz_catalog_glass(self.M, self.gamma0)
+                        if self.redraw_barriers:
+                            self.Q0[ux,uy,uz] = self.barrier_generator((self.M,))
                     else:
-                        self.catalog[ux,uy,uz,um] = stz_catalog_glass(1, self.gamma0)[0]
-                    self.Q0[ux,uy,uz,um] = self.barrier_generator((1,))[0]
-                
-                if track_cascades:
-                    self.flip_event_history.append((int(global_step), int(local_step), int(ux), int(uy), int(uz), int(um)))
-            
-            n_flipped = len(flipped_indices)
-            self.log_cascade(global_step, local_step, flipped_indices, 0.0, n_unstable=n_flipped)
-            total_flips += n_flipped
-            
-            # Cascade Timing: Advance time and strain PER ITERATION
-            dt_cascade = 0.0
-            if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
-            elif self.cascade_timing == "per_flip": dt_cascade = n_flipped / self.nu0
-            
-            if dt_cascade > 0:
-                self.time += dt_cascade
-                self.heat_conducting_3d(dt_cascade)
-                if strain_unit_tensor is not None:
-                    self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+                        if self.use_3d_barriers:
+                            self.catalog[ux,uy,uz,um] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                        else:
+                            self.catalog[ux,uy,uz,um] = stz_catalog_glass(1, self.gamma0)[0]
+                        self.Q0[ux,uy,uz,um] = self.barrier_generator((1,))[0]
+                    
+                    if track_cascades:
+                        self.flip_event_history.append((int(global_step), int(local_step), int(ux), int(uy), int(uz), int(um)))
 
-            self.update_stresses()
+                dt_cascade = 0.0
+                if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
+                elif self.cascade_timing == "per_flip": dt_cascade = len(flipped_indices) / self.nu0
+                
+                if dt_cascade > 0:
+                    self.time += dt_cascade
+                    self.heat_conducting_3d(dt_cascade)
+                    if strain_unit_tensor is not None:
+                        self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+
+                self.update_stresses()
             
             if log_callback:
                 log_callback(local_step, n_flipped)
@@ -772,97 +856,164 @@ class ThermalSimulation:
                         C = self.catalog[x,y,z,m].copy()
                         
                         if self.strain_assumption == "finite_strain":
-                            I_plus_C = np.eye(3) + C
-                            det_I_plus_C = np.linalg.det(I_plus_C)
-                            I_plus_C = I_plus_C / (max(1e-12, det_I_plus_C)**(1.0/3.0))
-                            self.F_plastic[x, y, z] = np.dot(I_plus_C, self.F_plastic[x, y, z])
+                            F_plastic_backup = self.F_plastic.copy()
+                            F_field_backup = self.F_field.copy()
+                            sig_field_backup = self.sig_field.copy()
+                            eps_field_backup = self.eps_field.copy()
+                            F_macro_backup = self.F_macro.copy()
+                            eps_macro_backup = self.eps_macro.copy()
+                            soft_prop_backup = self.soft_prop.copy()
+                            last_event_time_backup = self.last_event_time.copy()
+                            prev_strain_dir_backup = self.prev_strain_dir.copy()
+                            catalog_backup = self.catalog.copy()
+                            Q0_backup = self.Q0.copy()
+                            Tlocal_backup = self.Tlocal.copy()
+                            time_backup = self.time
+
+                            success = False
+                            for N in range(2, 6):
+                                self.F_plastic = F_plastic_backup.copy()
+                                self.F_field = F_field_backup.copy()
+                                self.sig_field = sig_field_backup.copy()
+                                self.eps_field = eps_field_backup.copy()
+                                self.F_macro = F_macro_backup.copy()
+                                self.eps_macro = eps_macro_backup.copy()
+                                self.soft_prop = soft_prop_backup.copy()
+                                self.last_event_time = last_event_time_backup.copy()
+                                self.prev_strain_dir = prev_strain_dir_backup.copy()
+                                self.catalog = catalog_backup.copy()
+                                self.Q0 = Q0_backup.copy()
+                                self.Tlocal = Tlocal_backup.copy()
+                                self.time = time_backup
+
+                                try:
+                                    for step_idx in range(1, N + 1):
+                                        C_sub = C / N
+                                        I_plus_C_sub = np.eye(3) + C_sub
+                                        det_I_plus_C_sub = np.linalg.det(I_plus_C_sub)
+                                        I_plus_C_sub = I_plus_C_sub / (max(1e-12, det_I_plus_C_sub)**(1.0/3.0))
+                                        self.F_plastic[x, y, z] = np.dot(I_plus_C_sub, self.F_plastic[x, y, z])
+
+                                        if step_idx == N:
+                                            e11, e22, e33 = C[0,0], C[1,1], C[2,2]
+                                            e12, e13, e23 = C[0,1], C[0,2], C[1,2]
+                                            sum_sq = (e12**2 + e23**2 + e13**2) + ((e22 - e33)**2 + (e33 - e11)**2 + (e11 - e22)**2) / 6.0
+                                            
+                                            gp_new = self.soft_prop[x,y,z,0] + self.jp * sum_sq
+                                            if self.softening_cap > 0 and gp_new > self.softening_cap: gp_new = self.softening_cap
+                                            self.soft_prop[x,y,z,0] = gp_new
+                                            self.soft_prop[x,y,z,1] = self.jt * sum_sq
+                                            self.last_event_time[x,y,z] = self.time
+
+                                            if self.neighbor_softening_fraction > 0.0:
+                                                nx, ny, nz = self.grid_shape
+                                                for dx in (-1, 0, 1):
+                                                    for dy in (-1, 0, 1):
+                                                        for dz in (-1, 0, 1):
+                                                            if dx == 0 and dy == 0 and dz == 0: continue
+                                                            nx_n = (x + dx + nx) % nx
+                                                            ny_n = (y + dy + ny) % ny
+                                                            nz_n = (z + dz + nz) % nz
+                                                            gp_n_new = self.soft_prop[nx_n, ny_n, nz_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
+                                                            if self.softening_cap > 0 and gp_n_new > self.softening_cap: gp_n_new = self.softening_cap
+                                                            self.soft_prop[nx_n, ny_n, nz_n, 0] = gp_n_new
+                                                            self.soft_prop[nx_n, ny_n, nz_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+
+                                            self.prev_strain_dir[x,y,z] = C
+
+                                            if self.enable_thermal:
+                                                DeltaHeat = np.sum(self.sig_field[x, y, z] * C)
+                                                delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                                                self.Tlocal[x, y, z] += delta_T
+                                                if self.temperature_cap > 0:
+                                                    self.Tlocal[x, y, z] = min(self.Tlocal[x, y, z], self.temperature_cap)
+
+                                            if self.redraw_directions or self.redraw_barriers:
+                                                if self.redraw_directions:
+                                                    if self.use_3d_barriers:
+                                                        self.catalog[x,y,z] = stz_catalog_glass_3d(self.M, self.gamma0)
+                                                    else:
+                                                        self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
+                                                if self.redraw_barriers: self.Q0[x,y,z] = self.barrier_generator((self.M,))
+                                            else:
+                                                if self.use_3d_barriers:
+                                                    self.catalog[x,y,z,m] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                                                else:
+                                                    self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
+                                                self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
+
+                                        self.update_stresses()
+                                    
+                                    success = True
+                                    break
+                                except ValueError as e:
+                                    print(f"Warning: sub-stepping with N={N} failed: {e}. Trying N={N+1}...")
                             
-                            # Update softening locally
-                            e11, e22, e33 = C[0,0], C[1,1], C[2,2]
-                            e12, e13, e23 = C[0,1], C[0,2], C[1,2]
-                            sum_sq = (e12**2 + e23**2 + e13**2) + ((e22 - e33)**2 + (e33 - e11)**2 + (e11 - e22)**2) / 6.0
-                            
-                            gp_new = self.soft_prop[x,y,z,0] + self.jp * sum_sq
-                            if self.softening_cap > 0 and gp_new > self.softening_cap: gp_new = self.softening_cap
-                            self.soft_prop[x,y,z,0] = gp_new
-                            self.soft_prop[x,y,z,1] = self.jt * sum_sq
-                            self.last_event_time[x,y,z] = self.time
-                            
-                            if self.neighbor_softening_fraction > 0.0:
-                                nx, ny, nz = self.grid_shape
-                                for dx in (-1, 0, 1):
-                                    for dy in (-1, 0, 1):
-                                        for dz in (-1, 0, 1):
-                                            if dx == 0 and dy == 0 and dz == 0: continue
-                                            nx_n = (x + dx + nx) % nx
-                                            ny_n = (y + dy + ny) % ny
-                                            nz_n = (z + dz + nz) % nz
-                                            gp_n_new = self.soft_prop[nx_n, ny_n, nz_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
-                                            if self.softening_cap > 0 and gp_n_new > self.softening_cap: gp_n_new = self.softening_cap
-                                            self.soft_prop[nx_n, ny_n, nz_n, 0] = gp_n_new
-                                            self.soft_prop[nx_n, ny_n, nz_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+                            if not success:
+                                import sys
+                                sys.exit("Simulation aborted: Mechanical solver failed to converge under sub-stepping.")
                         else:
                             apply_flip_soa(self.eps_plastic, None, self.soft_prop, self.last_event_time,
                                            self.catalog, x, y, z, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
-                        self.prev_strain_dir[x,y,z] = C
-                        
-                        if self.enable_thermal:
-                            DeltaHeat = np.sum(self.sig_field[x, y, z] * C)
-                            delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
-                            self.Tlocal[x, y, z] += delta_T
-                            if self.temperature_cap > 0:
-                                self.Tlocal[x, y, z] = min(self.Tlocal[x, y, z], self.temperature_cap)
-                        
-                        if self.redraw_directions or self.redraw_barriers:
-                            if self.redraw_directions:
-                                if self.use_3d_barriers:
-                                    self.catalog[x,y,z] = stz_catalog_glass_3d(self.M, self.gamma0)
-                                else:
-                                    self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
-                            if self.redraw_barriers: self.Q0[x,y,z] = self.barrier_generator((self.M,))
-                        else:
-                            if self.use_3d_barriers:
-                                self.catalog[x,y,z,m] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                            self.prev_strain_dir[x,y,z] = C
+                            
+                            if self.enable_thermal:
+                                DeltaHeat = np.sum(self.sig_field[x, y, z] * C)
+                                delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                                self.Tlocal[x, y, z] += delta_T
+                                if self.temperature_cap > 0:
+                                    self.Tlocal[x, y, z] = min(self.Tlocal[x, y, z], self.temperature_cap)
+                            
+                            if self.redraw_directions or self.redraw_barriers:
+                                if self.redraw_directions:
+                                    if self.use_3d_barriers:
+                                        self.catalog[x,y,z] = stz_catalog_glass_3d(self.M, self.gamma0)
+                                    else:
+                                        self.catalog[x,y,z] = stz_catalog_glass(self.M, self.gamma0)
+                                if self.redraw_barriers: self.Q0[x,y,z] = self.barrier_generator((self.M,))
                             else:
-                                self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
-                            self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
-                        
-                        if getattr(self, 'fast_patching_enabled', False):
-                            if self.sigma_macro_unit is None:
-                                eps_plas = np.zeros_like(self.eps_plastic)
-                                _, self.sigma_macro_unit, _, _ = update_stress_fft_full(
-                                    eps_plas, strain_unit_tensor, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                                )
-                            if t_wait > 0:
-                                self.sig_field += self.sigma_macro_unit * (self.strain_rate * t_wait)
+                                if self.use_3d_barriers:
+                                    self.catalog[x,y,z,m] = stz_catalog_glass_3d(1, self.gamma0)[0]
+                                else:
+                                    self.catalog[x,y,z,m] = stz_catalog_glass(1, self.gamma0)[0]
+                                self.Q0[x,y,z,m] = self.barrier_generator((1,))[0]
                             
-                            c0, c1, c2, c3, c4 = C[0,0], -C[2,2], C[0,1], C[0,2], C[1,2]
-                            patch = (c0 * self.patch_kernels[0] + c1 * self.patch_kernels[1] + 
-                                     c2 * self.patch_kernels[2] + c3 * self.patch_kernels[3] + 
-                                     c4 * self.patch_kernels[4])
-                            
-                            mean_shift = (c0 * self.patch_missing_mean[0] + c1 * self.patch_missing_mean[1] + 
-                                          c2 * self.patch_missing_mean[2] + c3 * self.patch_missing_mean[3] + 
-                                          c4 * self.patch_missing_mean[4])
-                            
-                            nx, ny, nz = self.grid_shape
-                            R = self.patch_radius
-                            for dx in range(-R, R+1):
-                                for dy in range(-R, R+1):
-                                    for dz in range(-R if nz>1 else 0, R+1 if nz>1 else 1):
-                                        px, py, pz = (x+dx)%nx, (y+dy)%ny, (z+dz)%nz
-                                        self.sig_field[px, py, pz] += patch[dx+R, dy+R, dz+R if nz>1 else 0]
-                            
-                            self.sig_field += mean_shift
-                            
-                            self.flips_since_sync += 1
-                            if self.flips_since_sync >= self.sync_interval:
-                                self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                                    self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-                                )
-                                self.flips_since_sync = 0
-                        else:
-                            self.update_stresses()
+                            if getattr(self, 'fast_patching_enabled', False):
+                                if self.sigma_macro_unit is None:
+                                    eps_plas = np.zeros_like(self.eps_plastic)
+                                    _, self.sigma_macro_unit, _, _ = update_stress_fft_full(
+                                        eps_plas, strain_unit_tensor, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                                    )
+                                if t_wait > 0:
+                                    self.sig_field += self.sigma_macro_unit * (self.strain_rate * t_wait)
+                                
+                                c0, c1, c2, c3, c4 = C[0,0], -C[2,2], C[0,1], C[0,2], C[1,2]
+                                patch = (c0 * self.patch_kernels[0] + c1 * self.patch_kernels[1] + 
+                                         c2 * self.patch_kernels[2] + c3 * self.patch_kernels[3] + 
+                                         c4 * self.patch_kernels[4])
+                                
+                                mean_shift = (c0 * self.patch_missing_mean[0] + c1 * self.patch_missing_mean[1] + 
+                                              c2 * self.patch_missing_mean[2] + c3 * self.patch_missing_mean[3] + 
+                                              c4 * self.patch_missing_mean[4])
+                                
+                                nx, ny, nz = self.grid_shape
+                                R = self.patch_radius
+                                for dx in range(-R, R+1):
+                                    for dy in range(-R, R+1):
+                                        for dz in range(-R if nz>1 else 0, R+1 if nz>1 else 1):
+                                            px, py, pz = (x+dx)%nx, (y+dy)%ny, (z+dz)%nz
+                                            self.sig_field[px, py, pz] += patch[dx+R, dy+R, dz+R if nz>1 else 0]
+                                
+                                self.sig_field += mean_shift
+                                
+                                self.flips_since_sync += 1
+                                if self.flips_since_sync >= self.sync_interval:
+                                    self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                                        self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                                    )
+                                    self.flips_since_sync = 0
+                            else:
+                                self.update_stresses()
                         
                         log_type = "kmc_instab" if is_instab else "kmc"
                         # In KMC mode, cascade counter is 0 as per request
