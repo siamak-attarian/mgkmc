@@ -151,6 +151,10 @@ def main():
     if abs(C_val) < 1e6 and C_val != 0.0:
         C_val *= 1e9
 
+    # Load Secant Degradation parameters (d, k)
+    d_val = float(mat_conf.get('d', 0.0))
+    k_val = float(mat_conf.get('k', 0.0))
+
     # ---------------------------------------------------------
     # 3. Setup Physics & Dynamics
     # ---------------------------------------------------------
@@ -198,6 +202,7 @@ def main():
             q_act_temp=phys_conf.get('q_act_temp', 0.37),
             redraw_directions=phys_conf.get('redraw_directions', True),
             redraw_barriers=phys_conf.get('redraw_barriers', True),
+            stz_mode=phys_conf.get('stz_mode', 'simple_shear'),
             # nu0, etc. handled below in Dynamics
             
             # Outputs
@@ -397,48 +402,113 @@ def main():
                 return
 
             else:
-                # ---- Original small-strain path (unchanged) ----
-                from mgkmc.linear_elastic_simulator import linear_elastic_simulation_2d
+                # ---- Small-strain path ----
+                if hyperelastic_model == 'secant_degradation':
+                    from mgkmc.linear_elastic_simulator import secant_elastic_simulation_2d
 
-                target_strain_mask = np.ones((2, 2), dtype=bool)
-                target_values      = np.zeros((2, 2))
+                    # Derive lam/mu from E/nu (or read directly if supplied)
+                    if 'mu' in mat_conf and 'lambda' in mat_conf:
+                        mu_mode, mu_val, mu_params = parse_material_property(mat_conf.get('mu'), 26.92)
+                        lam_mode, lam_val, lam_params  = parse_material_property(mat_conf.get('lambda'), 40.38)
+                        mu_field_sec = generate_field(mu_mode, shape, constant_val=mu_val, params=mu_params)
+                        lam_field_sec = generate_field(lam_mode, shape, constant_val=lam_val, params=lam_params)
+                        if mu_field_sec.mean() < 1e6:
+                            mu_field_sec *= 1e9
+                        if lam_field_sec.mean() < 1e6:
+                            lam_field_sec *= 1e9
+                        if plane_mode == 'plane_stress':
+                            print(" [run.py] Applying plane stress correction to lambda (lambda* = 2*lambda*mu/(lambda + 2*mu)).")
+                            lam_field_sec = 2.0 * lam_field_sec * mu_field_sec / (lam_field_sec + 2.0 * mu_field_sec)
+                    else:
+                        # Compute from E, nu (plane-strain convention)
+                        if plane_mode == 'plane_stress':
+                            lam_field_sec = E_field * nu_field / (1.0 - nu_field**2)
+                        else:
+                            lam_field_sec = E_field * nu_field / ((1.0 + nu_field) * (1.0 - 2.0 * nu_field))
+                        mu_field_sec = E_field / (2.0 * (1.0 + nu_field))
 
-                target_strain_mask[component] = True
-                target_values[component]      = eps_target
+                    target_strain_mask = np.ones((2, 2), dtype=bool)
+                    target_values      = np.zeros((2, 2))
+                    target_strain_mask[component] = True
+                    target_values[component]      = eps_target
+                    for key, val in stress_targets.items():
+                        if key[0] < 2 and key[1] < 2:
+                            target_values[key]      = val
+                            target_strain_mask[key] = False
 
-                for key, val in stress_targets.items():
-                    if key[0] < 2 and key[1] < 2:
-                        target_values[key]      = val
-                        target_strain_mask[key] = False
+                    chk_val = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+                    vtk_val = parse_interval(out_conf.get('vtk_interval', 'none'))
 
-                chk_val = parse_interval(out_conf.get('checkpoint_interval', 'none'))
-                vtk_val = parse_interval(out_conf.get('vtk_interval', 'none'))
+                    print(f"\nRunning 2D Secant Elastic Degradation Solver ({plane_mode}) "
+                          f"for {calculated_n_steps} steps "
+                          f"[d={d_val:.4f}, k={k_val:.2f}]...")
+                    eps_mac_list, sig_mac_list, eps_list, sig_list = \
+                        secant_elastic_simulation_2d(
+                            lam=lam_field_sec, mu=mu_field_sec,
+                            d=d_val, k=k_val,
+                            target_strain_mask=target_strain_mask,
+                            target_values=target_values,
+                            n_steps=calculated_n_steps,
+                            pixel=sys_conf['pixel'],
+                            plane_mode=plane_mode,
+                            store=True,
+                            tol_macro=tol_macro_pa,
+                            log_path=log_path,
+                            global_log_path=global_log_path,
+                            driving_component=component,
+                            enable_console=enable_console,
+                            checkpoint_interval=chk_val,
+                            checkpoint_path=os.path.join(out_dir, 'checkpoint'),
+                            vtk_interval=vtk_val,
+                            vtk_path=os.path.join(out_dir, 'step')
+                        )
+                    print(f"2D Secant Elastic simulation completed. "
+                          f"Logs written to {out_dir}.")
+                    return
 
-                print(f"\nRunning 2D Small-Strain Mixed Solver ({plane_mode}) "
-                      f"for {calculated_n_steps} steps...")
-                eps_mac_list, sig_mac_list, eps_list, sig_list = \
-                    linear_elastic_simulation_2d(
-                        E=E_field, nu=nu_field,
-                        target_strain_mask=target_strain_mask,
-                        target_values=target_values,
-                        n_steps=calculated_n_steps,
-                        pixel=sys_conf['pixel'],
-                        plane_mode=plane_mode,
-                        store=True,
-                        tol_macro=tol_macro_pa,
-                        log_path=log_path,
-                        global_log_path=global_log_path,
-                        driving_component=component,
-                        enable_console=enable_console,
-                        checkpoint_interval=chk_val,
-                        checkpoint_path=os.path.join(out_dir, 'checkpoint'),
-                        vtk_interval=vtk_val,
-                        vtk_path=os.path.join(out_dir, 'step')
-                    )
+                else:
+                    # ---- Original small-strain linear-elastic path (unchanged) ----
+                    from mgkmc.linear_elastic_simulator import linear_elastic_simulation_2d
 
-                print(f"2D Elastic simulation completed. "
-                      f"Data output to checkpoints in {out_dir}.")
-                return
+                    target_strain_mask = np.ones((2, 2), dtype=bool)
+                    target_values      = np.zeros((2, 2))
+
+                    target_strain_mask[component] = True
+                    target_values[component]      = eps_target
+
+                    for key, val in stress_targets.items():
+                        if key[0] < 2 and key[1] < 2:
+                            target_values[key]      = val
+                            target_strain_mask[key] = False
+
+                    chk_val = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+                    vtk_val = parse_interval(out_conf.get('vtk_interval', 'none'))
+
+                    print(f"\nRunning 2D Small-Strain Mixed Solver ({plane_mode}) "
+                          f"for {calculated_n_steps} steps...")
+                    eps_mac_list, sig_mac_list, eps_list, sig_list = \
+                        linear_elastic_simulation_2d(
+                            E=E_field, nu=nu_field,
+                            target_strain_mask=target_strain_mask,
+                            target_values=target_values,
+                            n_steps=calculated_n_steps,
+                            pixel=sys_conf['pixel'],
+                            plane_mode=plane_mode,
+                            store=True,
+                            tol_macro=tol_macro_pa,
+                            log_path=log_path,
+                            global_log_path=global_log_path,
+                            driving_component=component,
+                            enable_console=enable_console,
+                            checkpoint_interval=chk_val,
+                            checkpoint_path=os.path.join(out_dir, 'checkpoint'),
+                            vtk_interval=vtk_val,
+                            vtk_path=os.path.join(out_dir, 'step')
+                        )
+
+                    print(f"2D Elastic simulation completed. "
+                          f"Data output to checkpoints in {out_dir}.")
+                    return
         elif dimensionality == "3d":
             out_dir = out_conf.get('directory', 'output')
             os.makedirs(out_dir, exist_ok=True)
@@ -484,39 +554,88 @@ def main():
                 print(f"3D Finite-Strain simulation completed. Logs written to {out_dir}.")
                 return
             else:
-                from mgkmc.linear_elastic_simulator import linear_elastic_simulation_3d
+                if hyperelastic_model == 'secant_degradation':
+                    from mgkmc.linear_elastic_simulator import secant_elastic_simulation_3d
 
-                target_strain_mask = np.ones((3, 3), dtype=bool)
-                target_values      = np.zeros((3, 3))
+                    if 'mu' in mat_conf and 'lambda' in mat_conf:
+                        mu_mode, mu_val, mu_params = parse_material_property(mat_conf.get('mu'), 26.92)
+                        lam_mode, lam_val, lam_params  = parse_material_property(mat_conf.get('lambda'), 40.38)
+                        mu_field_sec = generate_field(mu_mode, shape, constant_val=mu_val, params=mu_params)
+                        lam_field_sec = generate_field(lam_mode, shape, constant_val=lam_val, params=lam_params)
+                        if mu_field_sec.mean() < 1e6:
+                            mu_field_sec *= 1e9
+                        if lam_field_sec.mean() < 1e6:
+                            lam_field_sec *= 1e9
+                    else:
+                        lam_field_sec = E_field * nu_field / ((1.0 + nu_field) * (1.0 - 2.0 * nu_field))
+                        mu_field_sec = E_field / (2.0 * (1.0 + nu_field))
 
-                target_strain_mask[component] = True
-                target_values[component]      = eps_target
+                    target_strain_mask = np.ones((3, 3), dtype=bool)
+                    target_values      = np.zeros((3, 3))
+                    target_strain_mask[component] = True
+                    target_values[component]      = eps_target
+                    for key, val in stress_targets.items():
+                        target_values[key]      = val
+                        target_strain_mask[key] = False
 
-                for key, val in stress_targets.items():
-                    target_values[key]      = val
-                    target_strain_mask[key] = False
+                    print(f"\nRunning 3D Secant Elastic Degradation Solver for {calculated_n_steps} steps "
+                          f"[d={d_val:.4f}, k={k_val:.2f}]...")
+                    eps_mac_list, sig_mac_list, eps_list, sig_list = \
+                        secant_elastic_simulation_3d(
+                            lam=lam_field_sec, mu=mu_field_sec,
+                            d=d_val, k=k_val,
+                            target_strain_mask=target_strain_mask,
+                            target_values=target_values,
+                            n_steps=calculated_n_steps,
+                            pixel=sys_conf['pixel'],
+                            store=True,
+                            tol_macro=tol_macro_pa,
+                            log_path=log_path,
+                            global_log_path=global_log_path,
+                            driving_component=component,
+                            enable_console=enable_console,
+                            checkpoint_interval=chk_val,
+                            checkpoint_path=os.path.join(out_dir, "checkpoint"),
+                            vtk_interval=vtk_val,
+                            vtk_path=os.path.join(out_dir, "step")
+                        )
+                    print(f"3D Secant Elastic simulation completed. Logs written to {out_dir}.")
+                    return
 
-                print(f"\nRunning 3D Linear Elastic Solver for {calculated_n_steps} steps...")
-                eps_mac_list, sig_mac_list, eps_list, sig_list = linear_elastic_simulation_3d(
-                    E=E_field, nu=nu_field,
-                    target_strain_mask=target_strain_mask,
-                    target_values=target_values,
-                    n_steps=calculated_n_steps,
-                    pixel=sys_conf['pixel'],
-                    store=True,
-                    tol_macro=tol_macro_pa,
-                    log_path=log_path,
-                    global_log_path=global_log_path,
-                    driving_component=component,
-                    enable_console=enable_console,
-                    checkpoint_interval=chk_val,
-                    checkpoint_path=os.path.join(out_dir, "checkpoint"),
-                    vtk_interval=vtk_val,
-                    vtk_path=os.path.join(out_dir, "step")
-                )
+                else:
+                    from mgkmc.linear_elastic_simulator import linear_elastic_simulation_3d
 
-                print(f"3D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
-                return
+                    target_strain_mask = np.ones((3, 3), dtype=bool)
+                    target_values      = np.zeros((3, 3))
+
+                    target_strain_mask[component] = True
+                    target_values[component]      = eps_target
+
+                    for key, val in stress_targets.items():
+                        target_values[key]      = val
+                        target_strain_mask[key] = False
+
+                    print(f"\nRunning 3D Linear Elastic Solver for {calculated_n_steps} steps...")
+                    eps_mac_list, sig_mac_list, eps_list, sig_list = linear_elastic_simulation_3d(
+                        E=E_field, nu=nu_field,
+                        target_strain_mask=target_strain_mask,
+                        target_values=target_values,
+                        n_steps=calculated_n_steps,
+                        pixel=sys_conf['pixel'],
+                        store=True,
+                        tol_macro=tol_macro_pa,
+                        log_path=log_path,
+                        global_log_path=global_log_path,
+                        driving_component=component,
+                        enable_console=enable_console,
+                        checkpoint_interval=chk_val,
+                        checkpoint_path=os.path.join(out_dir, "checkpoint"),
+                        vtk_interval=vtk_val,
+                        vtk_path=os.path.join(out_dir, "step")
+                    )
+
+                    print(f"3D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
+                    return
         else:
             n_global_eval = 0
     else:
@@ -546,7 +665,8 @@ def main():
         enable_cascade_log=out_conf.get('enable_cascade_log', True),
         enable_kmc_log=out_conf.get('enable_kmc_log', True),
         track_cascades=out_conf.get('track_cascades', False),
-        max_kmc_steps_pct=det_conf.get('max_kmc_steps_pct', 0.3)
+        max_kmc_steps_pct=det_conf.get('max_kmc_steps_pct', 0.3),
+        max_cascade_steps_pct=det_conf.get('max_cascade_steps_pct', 0.3)
     )
     
     # If the user requested pure linear_elastic analysis, we halt here.

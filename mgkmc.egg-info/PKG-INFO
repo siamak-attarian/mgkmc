@@ -7,6 +7,7 @@ Classifier: Programming Language :: Python :: 3
 Classifier: Operating System :: OS Independent
 Requires-Python: >=3.7
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: numpy
 Requires-Dist: scipy
 Requires-Dist: matplotlib
@@ -14,7 +15,80 @@ Requires-Dist: meshio
 Requires-Dist: pyfftw
 Requires-Dist: h5py
 Requires-Dist: numba
+Requires-Dist: pyyaml
+Provides-Extra: docs
+Requires-Dist: sphinx; extra == "docs"
+Requires-Dist: sphinx-rtd-theme; extra == "docs"
+Requires-Dist: sphinx-autodoc-typehints; extra == "docs"
+Dynamic: license-file
 
-# mgkmc
+# MGKMC: FFT-based Homogenization of Metallic Glasses
 
-A library for FFT-based homogenization of metallic glasses.
+[![Documentation Status](https://readthedocs.org/projects/mgkmc/badge/?version=latest)](https://mgkmc.readthedocs.io/en/latest/?badge=latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+`mgkmc` is a Python library for mesoscale Kinetic Monte Carlo (KMC) and Athermal Quasi-Static (AQS) simulations of metallic glasses. It uses FFT-based homogenization to solve mechanical equilibrium and incorporates advanced softening models and mixed boundary conditions.
+
+## Features
+
+- **Hybrid AQS/KMC Simulation**: Transition between athermal loading and thermally activated events.
+- **FFT-Based Solver**: Efficiently solves for stress and strain fields using spectral methods.
+- **Softening Models**: Includes isotropic and directional softening schemes.
+- **Mixed Boundary Conditions**: Drive specific strain components while maintaining stress targets on others.
+- **High Performance**: Leverages `numba` for JIT compilation and `pyfftw` for fast Fourier transforms.
+- **Flexible Configuration**: Control simulations through simple YAML configuration files.
+
+## Installation
+
+### Prerequisites
+
+- Python 3.7+
+- FFTW3 library (required by `pyfftw`)
+
+### Setup
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/yourusername/mgkmc.git
+   cd mgkmc
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Install the package**:
+   ```bash
+   pip install -e .
+   ```
+
+## Quick Start
+
+The easiest way to run a simulation is using the provided `run.py` script and a `config.yaml` file.
+
+1. **Prepare your configuration**: Edit `config.yaml` to set your system geometry, material properties, and loading conditions.
+2. **Run the simulation**:
+   ```bash
+   python run.py --config config.yaml
+   ```
+3. **Analyze results**: Output files (logs and optionally plots) will be saved in the directory specified in `config.yaml`.
+
+## Documentation
+
+For detailed API documentation, including class and function descriptions, visit our [ReadTheDocs](https://mgkmc.readthedocs.io/).
+
+To build the documentation locally:
+```bash
+cd docs
+make html
+```
+The documentation will be available in `docs/_build/html/index.html`.
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

@@ -75,15 +75,26 @@ def decode_index_2d(flat_idx, ny, M):
     x = temp // ny
     return x, y, m
 
-def stz_catalog_glass_2d(M, gamma0):
-    """Generate M independent 2x2 STZ modes for 2D."""
+def stz_catalog_glass_2d(M, gamma0, stz_mode="simple_shear"):
+    """Generate M independent 2x2 STZ modes for 2D.
+    If stz_mode is 'pure_shear', generates traditional pure shear (causes exponential scaling in finite strain).
+    If stz_mode is 'simple_shear', generates simple shear mapping with the same symmetric part.
+    """
     catalog = np.zeros((M, 2, 2))
     for i in range(M):
         gxx = 0.5 * gamma0 * np.random.normal()
         gxy = 0.5 * gamma0 * np.random.normal()
-        catalog[i, 0, 0] = gxx
-        catalog[i, 1, 1] = -gxx
-        catalog[i, 0, 1] = catalog[i, 1, 0] = gxy
+        if stz_mode == "pure_shear":
+            catalog[i, 0, 0] = gxx
+            catalog[i, 1, 1] = -gxx
+            catalog[i, 0, 1] = catalog[i, 1, 0] = gxy
+        else:
+            R = np.sqrt(gxx**2 + gxy**2)
+            sign = 1.0 if np.random.rand() > 0.5 else -1.0
+            catalog[i, 0, 0] = gxx
+            catalog[i, 1, 1] = -gxx
+            catalog[i, 0, 1] = gxy + sign * R
+            catalog[i, 1, 0] = gxy - sign * R
     return catalog
 
 @jit(nopython=True, cache=True)

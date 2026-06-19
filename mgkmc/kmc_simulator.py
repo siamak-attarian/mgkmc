@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import time
+from scipy.linalg import expm
 from datetime import datetime
 from .linear_elastic_simulator import spectral_solver_2d
 from .kmc_simulator_functions import (
@@ -23,13 +24,14 @@ class KmcSimulation2D:
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
                  strain_assumption="small_strain", hyperelastic_model="svk",
-                 A_m=0.0, B_m=0.0, C_m=0.0, solver="al"):
+                 A_m=0.0, B_m=0.0, C_m=0.0, solver="al", stz_mode="simple_shear"):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
         self.pixel, self.volume = pixel, pixel**3 # 3D STZ volume per paper Eq.12
         self.output_dir = output_dir
         self.solver = solver
+        self.stz_mode = stz_mode
         if not os.path.exists(output_dir): os.makedirs(output_dir)
 
         # Physics params
@@ -118,7 +120,7 @@ class KmcSimulation2D:
         self.catalog = np.zeros((nx, ny, M, 2, 2))
         for x in range(nx):
             for y in range(ny):
-                self.catalog[x,y] = stz_catalog_glass_2d(M, gamma0)
+                self.catalog[x,y] = stz_catalog_glass_2d(M, gamma0, stz_mode=self.stz_mode)
         
         self.prev_strain_dir = np.zeros((nx, ny, 2, 2))
         self.solver_args = {}
@@ -232,6 +234,11 @@ class KmcSimulation2D:
             self.patch_missing_mean.append(np.mean(sig_field, axis=(0,1)) - np.sum(crop, axis=(0,1))/(nx*ny))
 
         print(" [KmcSimulation2D] Fast Patching Kernels Ready.")
+
+    def _min_substeps_for_flip(self, C, gamma_step=0.02):
+        """Minimum N so that each sub-step has effective shear amplitude < gamma_step."""
+        gamma_eff = np.sqrt(0.5 * np.sum(C**2))   # von-Mises equivalent shear
+        return max(2, int(np.ceil(gamma_eff / gamma_step)))
 
     def elastic_run(self, eps_macro):
         """Standard 2D elastic equilibrium step, supporting both small and finite strain."""
@@ -365,8 +372,13 @@ class KmcSimulation2D:
                 Tlocal_backup = self.Tlocal.copy()
                 time_backup = self.time
 
+                N_start = 2
+                if len(flipped_events) > 0:
+                    N_start = max(self._min_substeps_for_flip(self.catalog[x, y, m]) for x, y, m in flipped_events)
+                N_start = min(N_start, 40)
+
                 success = False
-                for N in range(2, 21):
+                for N in range(N_start, N_start + 20):
                     self.F_plastic = F_plastic_backup.copy()
                     self.F_field = F_field_backup.copy()
                     self.sig_field = sig_field_backup.copy()
@@ -382,14 +394,20 @@ class KmcSimulation2D:
                     self.time = time_backup
 
                     try:
+                        sig_befores = {}
+                        eps_befores = {}
+                        C_saved = {}
+                        for x, y, m in flipped_events:
+                            sig_befores[(x,y)] = self.sig_field[x, y].copy()
+                            eps_befores[(x,y)] = self.eps_field[x, y].copy()
+                            C_saved[(x,y,m)] = self.catalog[x, y, m].copy()
+
                         for step_idx in range(1, N + 1):
                             for x, y, m in flipped_events:
                                 C = self.catalog[x, y, m].copy()
                                 C_sub = C / N
-                                I_plus_C_sub = np.eye(2) + C_sub
-                                det_I_plus_C_sub = I_plus_C_sub[0,0] * I_plus_C_sub[1,1] - I_plus_C_sub[0,1] * I_plus_C_sub[1,0]
-                                I_plus_C_sub = I_plus_C_sub / np.sqrt(max(1e-12, det_I_plus_C_sub))
-                                self.F_plastic[x, y] = np.dot(I_plus_C_sub, self.F_plastic[x, y])
+                                delta_Fp = expm(C_sub)
+                                self.F_plastic[x, y] = np.dot(delta_Fp, self.F_plastic[x, y])
 
                                 if step_idx == N:
                                     e11, e22, e12 = C[0,0], C[1,1], C[0,1]
@@ -424,14 +442,20 @@ class KmcSimulation2D:
 
                                     if self.redraw_directions or self.redraw_barriers:
                                         if self.redraw_directions:
-                                            self.catalog[x, y] = stz_catalog_glass_2d(self.M, self.gamma0)
+                                            self.catalog[x, y] = stz_catalog_glass_2d(self.M, self.gamma0, stz_mode=self.stz_mode)
                                         if self.redraw_barriers:
                                             self.Q0[x, y] = self.barrier_generator((self.M,))
                                     else:
-                                        self.catalog[x, y, m] = stz_catalog_glass_2d(1, self.gamma0)[0]
+                                        self.catalog[x, y, m] = stz_catalog_glass_2d(1, self.gamma0, stz_mode=self.stz_mode)[0]
                                         self.Q0[x, y, m] = self.barrier_generator((1,))[0]
 
                             self.elastic_run(self.eps_macro)
+                        
+                        if hasattr(self, 'flip_callback'):
+                            for x, y, m in flipped_events:
+                                sig_after = self.sig_field[x, y].copy()
+                                eps_after = self.eps_field[x, y].copy()
+                                self.flip_callback(self, x, y, m, C_saved[(x,y,m)], sig_befores[(x,y)], sig_after, eps_befores[(x,y)], eps_after, 'cascade')
                         
                         success = True
                         break
@@ -439,10 +463,19 @@ class KmcSimulation2D:
                         print(f"Warning: sub-stepping with N={N} failed: {e}. Trying N={N+1}...")
                 
                 if not success:
-                    import sys
-                    sys.exit("Simulation aborted: Mechanical solver failed to converge under sub-stepping.")
+                    raise ValueError("Mechanical solver failed to converge under sub-stepping.")
             else:
+                sig_befores = {}
+                eps_befores = {}
+                C_saved = {}
                 for x, y, m in flipped_events:
+                    sig_befores[(x,y)] = self.sig_field[x, y].copy()
+                    eps_befores[(x,y)] = self.eps_field[x, y].copy()
+                    C_saved[(x,y,m)] = self.catalog[x, y, m].copy()
+
+                for x, y, m in flipped_events:
+                    with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'a') as f_log:
+                        f_log.write(f"{step},{x},{y},cascade\n")
                     apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                     self.prev_strain_dir[x, y] = self.catalog[x, y, m].copy()
                     
@@ -455,11 +488,11 @@ class KmcSimulation2D:
                     
                     if self.redraw_directions or self.redraw_barriers:
                         if self.redraw_directions:
-                            self.catalog[x, y] = stz_catalog_glass_2d(self.M, self.gamma0)
+                            self.catalog[x, y] = stz_catalog_glass_2d(self.M, self.gamma0, stz_mode=self.stz_mode)
                         if self.redraw_barriers:
                             self.Q0[x, y] = self.barrier_generator((self.M,))
                     else:
-                        self.catalog[x, y, m] = stz_catalog_glass_2d(1, self.gamma0)[0]
+                        self.catalog[x, y, m] = stz_catalog_glass_2d(1, self.gamma0, stz_mode=self.stz_mode)[0]
                         self.Q0[x, y, m] = self.barrier_generator((1,))[0]
                     
                     if self.fast_patching_enabled:
@@ -476,6 +509,12 @@ class KmcSimulation2D:
                 
                 if not self.fast_patching_enabled:
                     self.elastic_run(self.eps_macro)
+
+                if hasattr(self, 'flip_callback'):
+                    for x, y, m in flipped_events:
+                        sig_after = self.sig_field[x, y].copy()
+                        eps_after = self.eps_field[x, y].copy()
+                        self.flip_callback(self, x, y, m, C_saved[(x,y,m)], sig_befores[(x,y)], sig_after, eps_befores[(x,y)], eps_after, 'cascade')
             
             total_flips += flips_in_this_batch
             local_step += 1
@@ -494,7 +533,7 @@ class KmcSimulation2D:
                   vtk_interval="none", vtk_elastic_only=True, 
                   track_cascades=False, enable_console_log=True,
                   summary_filename="summary_log.txt", enable_summary_log=True,
-                  enable_global_log=True, max_kmc_steps_pct=0.3, **kwargs):
+                  enable_global_log=True, max_kmc_steps_pct=0.3, max_cascade_steps_pct=0.3, **kwargs):
         
         self.driving_component = component
         self.stress_targets = stress_targets
@@ -505,6 +544,10 @@ class KmcSimulation2D:
         elastic_steps_done, total_kmc_steps, cascade_event_count, step = 0, 0, 0, 1
         sequential_kmc_steps = 0
         max_sequential_kmc = int(max_kmc_steps_pct * self.nx * self.ny)
+        max_cascade_limit = int(max_cascade_steps_pct * self.nx * self.ny)
+        
+        with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'w') as f_log:
+            f_log.write("Step,X,Y,Type\n")
         
         def _do_logging(s, s_type, c_id, c_flips):
             epsM, sigM = self.eps_macro.copy(), self.sig_field.mean(axis=(0,1))
@@ -567,7 +610,13 @@ class KmcSimulation2D:
                     if len(unstable) > 0:
                         _, f, _, _, _, _ = self._run_cascade(step, component=component)
                         if f > 0: cascade_event_count += 1
+                        
+                        if cascade_event_count > max_cascade_limit:
+                            print(f"\n[TERMINATE] Cascade instability sequence limit reached! {cascade_event_count} batches.")
+                            return
                         continue
+                    
+                    cascade_event_count = 0
 
                 eff_volume = self.volume if self.scale_rate_by_volume else 1.0
                 rates, indices, total_rate = compute_rates_2d(self.Q, eff_volume, self.Tlocal if self.enable_thermal else self.temperature, self.nu0, instability_mode=self.instability_mode)
@@ -581,10 +630,16 @@ class KmcSimulation2D:
                         idx_flat = indices[select_event_2d(rates, total_rate)]
                         x, y, m = decode_index_2d(idx_flat, self.ny, self.M)
                         self.last_flip = (x, y, m)
+                        with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'a') as f_log:
+                            f_log.write(f"{step},{x},{y},kmc\n")
                         
                         is_instab = self.Q[x,y,m] <= self.stability_threshold
                         C = self.catalog[x,y,m].copy()
                         if self.strain_assumption == "finite_strain":
+                            sig_before = self.sig_field[x, y].copy()
+                            eps_before = self.eps_field[x, y].copy()
+                            C_saved = C.copy()
+
                             F_plastic_backup = self.F_plastic.copy()
                             F_field_backup = self.F_field.copy()
                             sig_field_backup = self.sig_field.copy()
@@ -599,8 +654,11 @@ class KmcSimulation2D:
                             Tlocal_backup = self.Tlocal.copy()
                             time_backup = self.time
 
+                            N_start = self._min_substeps_for_flip(C)
+                            N_start = min(N_start, 40)
+
                             success = False
-                            for N in range(2, 21):
+                            for N in range(N_start, N_start + 20):
                                 self.F_plastic = F_plastic_backup.copy()
                                 self.F_field = F_field_backup.copy()
                                 self.sig_field = sig_field_backup.copy()
@@ -618,10 +676,8 @@ class KmcSimulation2D:
                                 try:
                                     for step_idx in range(1, N + 1):
                                         C_sub = C / N
-                                        I_plus_C_sub = np.eye(2) + C_sub
-                                        det_I_plus_C_sub = I_plus_C_sub[0,0] * I_plus_C_sub[1,1] - I_plus_C_sub[0,1] * I_plus_C_sub[1,0]
-                                        I_plus_C_sub = I_plus_C_sub / np.sqrt(max(1e-12, det_I_plus_C_sub))
-                                        self.F_plastic[x, y] = np.dot(I_plus_C_sub, self.F_plastic[x, y])
+                                        delta_Fp = expm(C_sub)
+                                        self.F_plastic[x, y] = np.dot(delta_Fp, self.F_plastic[x, y])
 
                                         if step_idx == N:
                                             e11, e22, e12 = C[0,0], C[1,1], C[0,1]
@@ -654,11 +710,11 @@ class KmcSimulation2D:
 
                                             if self.redraw_directions or self.redraw_barriers:
                                                 if self.redraw_directions:
-                                                    self.catalog[x,y] = stz_catalog_glass_2d(self.M, self.gamma0)
+                                                    self.catalog[x,y] = stz_catalog_glass_2d(self.M, self.gamma0, stz_mode=self.stz_mode)
                                                 if self.redraw_barriers:
                                                     self.Q0[x,y] = self.barrier_generator((self.M,))
                                             else:
-                                                self.catalog[x,y,m] = stz_catalog_glass_2d(1, self.gamma0)[0]
+                                                self.catalog[x,y,m] = stz_catalog_glass_2d(1, self.gamma0, stz_mode=self.stz_mode)[0]
                                                 self.Q0[x,y,m] = self.barrier_generator((1,))[0]
 
                                         self.elastic_run(self.eps_macro)
@@ -668,10 +724,19 @@ class KmcSimulation2D:
                                 except ValueError as e:
                                     print(f"Warning: sub-stepping with N={N} failed: {e}. Trying N={N+1}...")
                             
+                            if success and hasattr(self, 'flip_callback'):
+                                sig_after = self.sig_field[x, y].copy()
+                                eps_after = self.eps_field[x, y].copy()
+                                self.flip_callback(self, x, y, m, C_saved, sig_before, sig_after, eps_before, eps_after, 'kmc')
+
                             if not success:
-                                import sys
-                                sys.exit("Simulation aborted: Mechanical solver failed to converge under sub-stepping.")
+                                raise ValueError("Mechanical solver failed to converge under sub-stepping.")
                         else:
+                            sig_before = None
+                            eps_before = None
+                            if hasattr(self, 'flip_callback'):
+                                sig_before = self.sig_field[x, y].copy()
+                                eps_before = self.eps_field[x, y].copy()
                             apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                             self.prev_strain_dir[x,y] = C
                             
@@ -684,11 +749,11 @@ class KmcSimulation2D:
                             
                             if self.redraw_directions or self.redraw_barriers:
                                 if self.redraw_directions:
-                                    self.catalog[x,y] = stz_catalog_glass_2d(self.M, self.gamma0)
+                                    self.catalog[x,y] = stz_catalog_glass_2d(self.M, self.gamma0, stz_mode=self.stz_mode)
                                 if self.redraw_barriers:
                                     self.Q0[x,y] = self.barrier_generator((self.M,))
                             else:
-                                self.catalog[x,y,m] = stz_catalog_glass_2d(1, self.gamma0)[0]
+                                self.catalog[x,y,m] = stz_catalog_glass_2d(1, self.gamma0, stz_mode=self.stz_mode)[0]
                                 self.Q0[x,y,m] = self.barrier_generator((1,))[0]
                             
                             if self.fast_patching_enabled:
@@ -713,12 +778,21 @@ class KmcSimulation2D:
                                         self.sig_field[px, py] += patch[dx+R, dy+R]
                                 self.sig_field += mean_shift
                                 
+                                if hasattr(self, 'flip_callback') and sig_before is not None:
+                                    sig_after = self.sig_field[x, y].copy()
+                                    eps_after = self.eps_field[x, y].copy()
+                                    self.flip_callback(self, x, y, m, C, sig_before, sig_after, eps_before, eps_after, 'kmc')
+                                
                                 self.flips_since_sync += 1
                                 if self.flips_since_sync >= self.sync_interval:
                                     self.elastic_run(self.eps_macro)
                                     self.flips_since_sync = 0
                             else:
                                 self.elastic_run(self.eps_macro)
+                                if hasattr(self, 'flip_callback') and sig_before is not None:
+                                    sig_after = self.sig_field[x, y].copy()
+                                    eps_after = self.eps_field[x, y].copy()
+                                    self.flip_callback(self, x, y, m, C, sig_before, sig_after, eps_before, eps_after, 'kmc')
                         
                         log_type = "KMC_INSTAB" if is_instab else "KMC"
                         if is_instab: sequential_kmc_steps += 1

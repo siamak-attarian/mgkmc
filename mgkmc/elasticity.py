@@ -105,3 +105,190 @@ def green_operator_3d(kx, ky, kz, lam0, mu0):
     return Gamma
 
 
+# ---------------------------------------------------------------------------
+# Secant Elastic Degradation helpers
+# ---------------------------------------------------------------------------
+
+def von_mises_strain_2d(eps):
+    """
+    Von Mises equivalent strain for a 2-D strain field.
+
+    Parameters
+    ----------
+    eps : ndarray, shape (nx, ny, 2, 2)
+        Small-strain tensor field (symmetric).
+
+    Returns
+    -------
+    eps_eq : ndarray, shape (nx, ny)
+        Equivalent strain  eps_eq = sqrt(2/3 * eps' : eps')
+        where  eps' = eps - (1/3) tr(eps) I  is the deviatoric part.
+
+    Notes
+    -----
+    In 2-D plane-strain the out-of-plane component eps_33 = 0 is included
+    implicitly: tr(eps) = eps_11 + eps_22, and the 3-D deviatoric formula
+    gives  eps'_33 = -(eps_11 + eps_22)/3.
+    """
+    e11 = eps[:, :, 0, 0]
+    e22 = eps[:, :, 1, 1]
+    e12 = eps[:, :, 0, 1]
+    e21 = eps[:, :, 1, 0]
+
+    # Deviatoric components (plane-strain: eps_33 = 0 => eps'_33 = -(e11+e22)/3)
+    tr3  = (e11 + e22) / 3.0
+    ep11 = e11 - tr3
+    ep22 = e22 - tr3
+    ep33 = -(e11 + e22) / 3.0   # out-of-plane deviatoric
+
+    eps_eq = np.sqrt(
+        (2.0 / 3.0) * (ep11**2 + ep22**2 + ep33**2
+                        + 0.5 * (e12 + e21)**2)
+    )
+    return eps_eq
+
+
+def von_mises_strain_3d(eps):
+    """
+    Von Mises equivalent strain for a 3-D strain field.
+
+    Parameters
+    ----------
+    eps : ndarray, shape (nx, ny, nz, 3, 3)
+        Small-strain tensor field (symmetric).
+
+    Returns
+    -------
+    eps_eq : ndarray, shape (nx, ny, nz)
+        Equivalent strain  eps_eq = sqrt(2/3 * eps' : eps').
+    """
+    e11 = eps[:, :, :, 0, 0]
+    e22 = eps[:, :, :, 1, 1]
+    e33 = eps[:, :, :, 2, 2]
+    e12 = eps[:, :, :, 0, 1]
+    e21 = eps[:, :, :, 1, 0]
+    e13 = eps[:, :, :, 0, 2]
+    e31 = eps[:, :, :, 2, 0]
+    e23 = eps[:, :, :, 1, 2]
+    e32 = eps[:, :, :, 2, 1]
+
+    tr3  = (e11 + e22 + e33) / 3.0
+    ep11 = e11 - tr3
+    ep22 = e22 - tr3
+    ep33 = e33 - tr3
+
+    eps_eq = np.sqrt(
+        (2.0 / 3.0) * (
+            ep11**2 + ep22**2 + ep33**2
+            + 0.5 * ((e12 + e21)**2 + (e13 + e31)**2 + (e23 + e32)**2)
+        )
+    )
+    return eps_eq
+
+
+def secant_shear_field(eps_eq, mu, d, k):
+    """
+    Pointwise secant shear modulus from the exponential degradation law:
+
+        mu_sec(eps_eq) = mu * [1 - d * (1 - exp(-k * eps_eq))]
+
+    Parameters
+    ----------
+    eps_eq : ndarray
+        Von Mises equivalent strain, any shape.
+    mu : float or ndarray broadcastable to eps_eq
+        Undegraded shear modulus (Pa).
+    d : float
+        Degradation magnitude, 0 <= d <= 1.
+        d=0 -> no degradation (linear elastic).
+        d=1 -> maximum degradation (mu_sec -> 0 as eps_eq -> inf).
+    k : float
+        Degradation rate (dimensionless; larger k = faster softening onset).
+
+    Returns
+    -------
+    mu_sec : ndarray (same shape as eps_eq)
+        Secant shear modulus field (Pa).
+    """
+    return mu * (1.0 - d * (1.0 - np.exp(-k * eps_eq)))
+
+
+def stress_from_strain_secant_2d(eps, lam, mu, d, k,
+                                  plane_mode="plane_strain"):
+    """
+    Secant-elastic Cauchy stress for a 2-D strain field:
+
+        sigma = lam * tr(eps) * I + 2 * mu_sec(eps_eq) * eps
+
+    where mu_sec follows the exponential degradation law and eps_eq is the
+    von Mises equivalent strain computed from eps.
+
+    Parameters
+    ----------
+    eps : ndarray, shape (nx, ny, 2, 2)
+        Small-strain tensor field.
+    lam : float or ndarray, shape (nx, ny)
+        First Lame parameter lambda (Pa).
+        For plane stress, pass the effective lambda* = E*nu/(1-nu^2).
+    mu : float or ndarray, shape (nx, ny)
+        Undegraded shear modulus mu (Pa).
+    d : float
+        Degradation magnitude (0 <= d <= 1).
+    k : float
+        Degradation rate (dimensionless).
+    plane_mode : str
+        "plane_strain" (default) or "plane_stress".  The caller is
+        responsible for passing the correct lam for the chosen mode;
+        this function uses lam directly.
+
+    Returns
+    -------
+    sig : ndarray, shape (nx, ny, 2, 2)
+        Cauchy stress tensor field (Pa).
+    """
+    eps_eq  = von_mises_strain_2d(eps)               # (nx, ny)
+    mu_sec  = secant_shear_field(eps_eq, mu, d, k)  # (nx, ny)
+
+    tr_eps  = np.trace(eps, axis1=2, axis2=3)[..., None, None]   # (nx,ny,1,1)
+    I       = np.eye(2)[None, None, :, :]
+
+    lam_    = np.asarray(lam)[..., None, None]
+    mu_sec_ = mu_sec[..., None, None]
+
+    return lam_ * tr_eps * I + 2.0 * mu_sec_ * eps
+
+
+def stress_from_strain_secant_3d(eps, lam, mu, d, k):
+    """
+    Secant-elastic Cauchy stress for a 3-D strain field:
+
+        sigma = lam * tr(eps) * I + 2 * mu_sec(eps_eq) * eps
+
+    Parameters
+    ----------
+    eps : ndarray, shape (nx, ny, nz, 3, 3)
+        Small-strain tensor field.
+    lam : float or ndarray, shape (nx, ny, nz)
+        First Lame parameter lambda (Pa).
+    mu : float or ndarray, shape (nx, ny, nz)
+        Undegraded shear modulus mu (Pa).
+    d : float
+        Degradation magnitude (0 <= d <= 1).
+    k : float
+        Degradation rate (dimensionless).
+
+    Returns
+    -------
+    sig : ndarray, shape (nx, ny, nz, 3, 3)
+        Cauchy stress tensor field (Pa).
+    """
+    eps_eq  = von_mises_strain_3d(eps)               # (nx, ny, nz)
+    mu_sec  = secant_shear_field(eps_eq, mu, d, k)  # (nx, ny, nz)
+
+    tr_eps  = np.trace(eps, axis1=3, axis2=4)[..., None, None]   # (nx,ny,nz,1,1)
+    I       = np.eye(3)[None, None, None, :, :]
+
+    lam_    = np.asarray(lam)[..., None, None]
+    mu_sec_ = mu_sec[..., None, None]
+
+    return lam_ * tr_eps * I + 2.0 * mu_sec_ * eps

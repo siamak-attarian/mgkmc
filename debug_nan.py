@@ -87,7 +87,7 @@ def debug_run():
         from mgkmc.finite_strain_simulator import constitutive_hyperelastic_2d, cauchy_from_P, _project
         import scipy.sparse.linalg as sp
         
-        P, K4 = constitutive_hyperelastic_2d(F_start, sim.C4_fs, sim.I2_fs, sim.I4_fs, sim.I4rt_fs, Fp=Fp_in)
+        P, K4, _ = constitutive_hyperelastic_2d(F_start, sim.C4_fs, sim.I2_fs, sim.I4_fs, sim.I4rt_fs, Fp=Fp_in)
         
         print(f"\nMacro Iter {it_mac}:")
         print("P mean:", P.mean(axis=(2,3)))
@@ -119,7 +119,7 @@ def debug_run():
         dF = dFm.reshape(2, 2, nx, ny)
         F_curr = F_start + DbarF_grid + dF
         
-        P, K4 = constitutive_hyperelastic_2d(F_curr, sim.C4_fs, sim.I2_fs, sim.I4_fs, sim.I4rt_fs, Fp=Fp_in)
+        P, K4, _ = constitutive_hyperelastic_2d(F_curr, sim.C4_fs, sim.I2_fs, sim.I4_fs, sim.I4rt_fs, Fp=Fp_in)
         Sig_field = cauchy_from_P(P, F_curr)
         Sig_mac = Sig_field.mean(axis=(2, 3))
         

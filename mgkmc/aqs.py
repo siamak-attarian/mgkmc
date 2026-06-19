@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import time
+from scipy.linalg import expm
 from datetime import datetime
 from mgkmc.stz.cascade import find_unstable, apply_flip_soa
 from mgkmc.stz.update_fft import update_stress_fft_full
@@ -235,6 +236,11 @@ class ThermalSimulation:
             self.patch_missing_mean.append(missing_mean)
             
         print(f" [ThermalSimulation] 5 Patch Kernels of radius {R} computed and cached.\n")
+
+    def _min_substeps_for_flip(self, C, gamma_step=0.005):
+        """Minimum N so that each sub-step has effective shear amplitude < gamma_step."""
+        gamma_eff = np.sqrt(0.5 * np.sum(C**2))   # von-Mises equivalent shear
+        return max(2, int(np.ceil(gamma_eff / gamma_step)))
 
     def export_vtk(self, filename):
         """Export current state to VTK."""
@@ -474,8 +480,13 @@ class ThermalSimulation:
                 Tlocal_backup = self.Tlocal.copy()
                 time_backup = self.time
 
+                N_start = 2
+                if len(flipped_indices) > 0:
+                    N_start = max(self._min_substeps_for_flip(self.catalog[ux, uy, uz, um]) for ux, uy, uz, um in flipped_indices)
+                N_start = min(N_start, 40)
+
                 success = False
-                for N in range(2, 21):
+                for N in range(N_start, N_start + 20):
                     self.F_plastic = F_plastic_backup.copy()
                     self.F_field = F_field_backup.copy()
                     self.sig_field = sig_field_backup.copy()
@@ -495,10 +506,8 @@ class ThermalSimulation:
                             for ux, uy, uz, um in flipped_indices:
                                 C = self.catalog[ux, uy, uz, um].copy()
                                 C_sub = C / N
-                                I_plus_C_sub = np.eye(3) + C_sub
-                                det_I_plus_C_sub = np.linalg.det(I_plus_C_sub)
-                                I_plus_C_sub = I_plus_C_sub / (max(1e-12, det_I_plus_C_sub)**(1.0/3.0))
-                                self.F_plastic[ux, uy, uz] = np.dot(I_plus_C_sub, self.F_plastic[ux, uy, uz])
+                                delta_Fp = expm(C_sub)
+                                self.F_plastic[ux, uy, uz] = np.dot(delta_Fp, self.F_plastic[ux, uy, uz])
 
                                 if step_idx == N:
                                     e11, e22, e33 = C[0,0], C[1,1], C[2,2]
@@ -870,8 +879,11 @@ class ThermalSimulation:
                             Tlocal_backup = self.Tlocal.copy()
                             time_backup = self.time
 
+                            N_start = self._min_substeps_for_flip(C)
+                            N_start = min(N_start, 40)
+
                             success = False
-                            for N in range(2, 21):
+                            for N in range(N_start, N_start + 20):
                                 self.F_plastic = F_plastic_backup.copy()
                                 self.F_field = F_field_backup.copy()
                                 self.sig_field = sig_field_backup.copy()
@@ -889,10 +901,8 @@ class ThermalSimulation:
                                 try:
                                     for step_idx in range(1, N + 1):
                                         C_sub = C / N
-                                        I_plus_C_sub = np.eye(3) + C_sub
-                                        det_I_plus_C_sub = np.linalg.det(I_plus_C_sub)
-                                        I_plus_C_sub = I_plus_C_sub / (max(1e-12, det_I_plus_C_sub)**(1.0/3.0))
-                                        self.F_plastic[x, y, z] = np.dot(I_plus_C_sub, self.F_plastic[x, y, z])
+                                        delta_Fp = expm(C_sub)
+                                        self.F_plastic[x, y, z] = np.dot(delta_Fp, self.F_plastic[x, y, z])
 
                                         if step_idx == N:
                                             e11, e22, e33 = C[0,0], C[1,1], C[2,2]

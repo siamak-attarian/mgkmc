@@ -462,24 +462,43 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
              
         S = S_3d[0:2, 0:2]
         
-        E_in = E_GL[0:2, 0:2]
-        II = _dyad22(I2, I2)
-        I4s = 0.5 * (I4 + I4rt)
+        # Build 3D identity tensors broadcast to (nx, ny)
+        ones_grid = np.ones((nx, ny))
+        i3 = np.eye(3)
+        I2_3d = np.einsum('ij,xy->ijxy', i3, ones_grid)
+        II_3d = np.einsum('ij,kl,xy->ijklxy', i3, i3, ones_grid)
         
-        term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * II
+        # 4th-order symmetric identity in 3D
+        I4s_3d = np.zeros((3, 3, 3, 3, nx, ny))
+        for i in range(3):
+            for j in range(3):
+                for k in range(3):
+                    for l in range(3):
+                        I4s_3d[i, j, k, l] = 0.5 * (i3[i, k] * i3[j, l] + i3[i, l] * i3[j, k])
+                        
+        term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * II_3d
         
-        I_dyad_E = np.einsum('ijxy,klxy->ijklxy', I2, E_in)
-        E_dyad_I = np.einsum('ijxy,klxy->ijklxy', E_in, I2)
+        I_dyad_E = np.einsum('ijxy,klxy->ijklxy', I2_3d, E_GL)
+        E_dyad_I = np.einsum('ijxy,klxy->ijklxy', E_GL, I2_3d)
         term2 = (2.0 * B_arr)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (I_dyad_E + E_dyad_I)
         
-        term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * I4s
+        term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * I4s_3d
         
-        term4_part1 = np.einsum('ikxy,jlxy->ijklxy', I2, E_in) + np.einsum('ikxy,jlxy->ijklxy', E_in, I2)
-        term4_part2 = np.einsum('ilxy,jkxy->ijklxy', I2, E_in) + np.einsum('ilxy,jkxy->ijklxy', E_in, I2)
+        term4_part1 = np.einsum('ikxy,jlxy->ijklxy', I2_3d, E_GL) + np.einsum('ikxy,jlxy->ijklxy', E_GL, I2_3d)
+        term4_part2 = np.einsum('ilxy,jkxy->ijklxy', I2_3d, E_GL) + np.einsum('ilxy,jkxy->ijklxy', E_GL, I2_3d)
         K_E = 0.5 * (term4_part1 + term4_part2)
         term4 = C_arr[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * K_E
         
-        C4_eff = term1 + term2 + term3 + term4
+        C4_3d = term1 + term2 + term3 + term4
+        
+        if plane_mode == "plane_stress":
+            C2222 = np.maximum(1e-14, C4_3d[2, 2, 2, 2])
+            C22 = C4_3d[:, :, 2, 2] # (3, 3, nx, ny)
+            C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2] - \
+                     C22[0:2, 0:2, np.newaxis, np.newaxis, :, :] * \
+                     C22[np.newaxis, np.newaxis, 0:2, 0:2, :, :] / C2222[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :]
+        else:
+            C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2]
     else:
         # Default: St. Venant-Kirchhoff (SVK)
         E_GL = 0.5 * (np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True) - I2)
@@ -775,9 +794,9 @@ def solve_dbfft_linear_system_2d(Xi, K4, M_inv, b_hat, tol_CG=1e-6, max_iter=150
     
     b_flat = b_hat.reshape(-1)
     try:
-        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, rtol=tol_CG, maxiter=max_iter)
+        sol_flat, info = sp.bicgstab(A_op, b_flat, M=M_op, rtol=tol_CG, maxiter=max_iter)
     except TypeError:
-        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, tol=tol_CG, maxiter=max_iter)
+        sol_flat, info = sp.bicgstab(A_op, b_flat, M=M_op, tol=tol_CG, maxiter=max_iter)
         
     return sol_flat.reshape(ndim, nx, ny), info
 
@@ -805,9 +824,9 @@ def solve_dbfft_linear_system_3d(Xi, K4, M_inv, b_hat, tol_CG=1e-6, max_iter=150
     
     b_flat = b_hat.reshape(-1)
     try:
-        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, rtol=tol_CG, maxiter=max_iter)
+        sol_flat, info = sp.bicgstab(A_op, b_flat, M=M_op, rtol=tol_CG, maxiter=max_iter)
     except TypeError:
-        sol_flat, info = sp.cg(A_op, b_flat, M=M_op, tol=tol_CG, maxiter=max_iter)
+        sol_flat, info = sp.bicgstab(A_op, b_flat, M=M_op, tol=tol_CG, maxiter=max_iter)
         
     return sol_flat.reshape(ndim, nx, ny, nz), info
 
@@ -855,15 +874,21 @@ def _dbfft_step_2d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
         M_inv = _invert_matrix_field_2d(A_mat)
         
         du_hat, _ = solve_dbfft_linear_system_2d(Xi, K4, M_inv, b_hat, tol_CG=tol_CG)
+        if np.any(np.isnan(du_hat)) or np.any(np.isinf(du_hat)):
+            raise ValueError("Linear solver returned NaN or Inf (BiCGSTAB breakdown).")
         du = _ifft2_tensor(du_hat)
         
         alpha = 1.0
         converged_constitutive = False
-        for _ in range(8):
+        for _ in range(16):
             u_trial = u + alpha * du
             grad_u_trial = get_grad_u_2d(u_trial, Xi)
             F_trial = F_bar_grid + grad_u_trial
-            Je = F_trial[0,0]*F_trial[1,1] - F_trial[0,1]*F_trial[1,0]
+            if Fp_inv is not None:
+                Fe_trial = np.einsum('ijxy,jkxy->ikxy', F_trial, Fp_inv, optimize=True)
+            else:
+                Fe_trial = F_trial
+            Je = Fe_trial[0,0]*Fe_trial[1,1] - Fe_trial[0,1]*Fe_trial[1,0]
             if np.any(Je <= 1e-4) or np.any(np.isnan(Je)):
                 alpha *= 0.5
                 continue
@@ -881,15 +906,10 @@ def _dbfft_step_2d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
             except Exception:
                 alpha *= 0.5
         if not converged_constitutive:
-            u = u + 0.05 * du
+            raise ValueError("Constitutive solver failed to converge in line search (potential negative Jacobian/NaN).")
             
-    grad_u = get_grad_u_2d(u, Xi)
-    F_curr = F_bar_grid + grad_u
-    P, K4, F33 = constitutive_hyperelastic_2d(
-        F_curr, C4, I2, I4, I4rt, Fp=Fp,
-        model_type=model_type, plane_mode=plane_mode,
-        A_m=A_m, B_m=B_m, C_m=C_m)
-    return F_curr, P, K4, F33, max_iter
+    # Newton loop finished without returning -> did not converge
+    raise ValueError(f"DBFFT solver did not converge within {max_iter} iterations. Final relative residual: {rel_res:.2e}")
 
 
 def _dbfft_step_3d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
@@ -927,18 +947,24 @@ def _dbfft_step_3d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
         M_inv = _invert_matrix_field_3d(A_mat)
         
         du_hat, _ = solve_dbfft_linear_system_3d(Xi, K4, M_inv, b_hat, tol_CG=tol_CG)
+        if np.any(np.isnan(du_hat)) or np.any(np.isinf(du_hat)):
+            raise ValueError("Linear solver returned NaN or Inf (BiCGSTAB breakdown).")
         du = _ifft3_tensor(du_hat)
         
         alpha = 1.0
         converged_constitutive = False
-        for _ in range(8):
+        for _ in range(16):
             u_trial = u + alpha * du
             grad_u_trial = get_grad_u_3d(u_trial, Xi)
             F_trial = F_bar_grid + grad_u_trial
+            if Fp_inv is not None:
+                Fe_trial = np.einsum('ijxyz,jkxyz->ikxyz', F_trial, Fp_inv, optimize=True)
+            else:
+                Fe_trial = F_trial
             Je = (
-                F_trial[0, 0] * (F_trial[1, 1] * F_trial[2, 2] - F_trial[1, 2] * F_trial[2, 1]) -
-                F_trial[0, 1] * (F_trial[1, 0] * F_trial[2, 2] - F_trial[1, 2] * F_trial[2, 0]) +
-                F_trial[0, 2] * (F_trial[1, 0] * F_trial[2, 1] - F_trial[1, 1] * F_trial[2, 0])
+                Fe_trial[0, 0] * (Fe_trial[1, 1] * Fe_trial[2, 2] - Fe_trial[1, 2] * Fe_trial[2, 1]) -
+                Fe_trial[0, 1] * (Fe_trial[1, 0] * Fe_trial[2, 2] - Fe_trial[1, 2] * Fe_trial[2, 0]) +
+                Fe_trial[0, 2] * (Fe_trial[1, 0] * Fe_trial[2, 1] - Fe_trial[1, 1] * Fe_trial[2, 0])
             )
             if np.any(Je <= 1e-4) or np.any(np.isnan(Je)):
                 alpha *= 0.5
@@ -956,14 +982,10 @@ def _dbfft_step_3d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
             except Exception:
                 alpha *= 0.5
         if not converged_constitutive:
-            u = u + 0.05 * du
+            raise ValueError("Constitutive solver failed to converge in line search (potential negative Jacobian/NaN).")
             
-    grad_u = get_grad_u_3d(u, Xi)
-    F_curr = F_bar_grid + grad_u
-    P, K4 = constitutive_hyperelastic_3d(
-        F_curr, C4, I2, I4, I4rt, Fp=Fp,
-        model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
-    return F_curr, P, K4, max_iter
+    # Newton loop finished without returning -> did not converge
+    raise ValueError(f"DBFFT solver did not converge within {max_iter} iterations. Final relative residual: {rel_res:.2e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1260,34 +1282,48 @@ def _al_step_2d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
         # Step 2: Green's operator step  δF = -G:φ
         dF = -G_op(phi)
 
-        # Step 3: update F and re-enforce BC
-        F_new = F + dF
-        DbarF = F_bar - F_new.mean(axis=(2, 3))
-        F_new = F_new + np.einsum('ij,xy->ijxy', DbarF, np.ones((nx, ny)))
-
-        # Step 4: constitutive update
-        P_new, K4_new, F33_new = constitutive_hyperelastic_2d(
-            F_new, C4, I2, I4, I4rt, Fp=Fp,
-            model_type=model_type, plane_mode=plane_mode,
-            A_m=A_m, B_m=B_m, C_m=C_m)
-
-        # Guard against NaN — if constitutive explodes, keep old stress and old F
-        if np.any(np.isnan(P_new)):
+        # Step 3: update F and re-enforce BC with backtracking
+        success_step = False
+        for beta in [1.0, 0.5, 0.25, 0.125, 0.0625]:
+            F_try = F + beta * dF
+            DbarF = F_bar - F_try.mean(axis=(2, 3))
+            F_try = F_try + np.einsum('ij,xy->ijxy', DbarF, np.ones((nx, ny)))
+            
+            if Fp_inv is not None:
+                Fe_try = np.einsum('ijxy,jkxy->ikxy', F_try, Fp_inv, optimize=True)
+            else:
+                Fe_try = F_try
+            Je_try = Fe_try[0,0]*Fe_try[1,1] - Fe_try[0,1]*Fe_try[1,0]
+            
+            try:
+                P_new, K4_new, F33_new = constitutive_hyperelastic_2d(
+                    F_try, C4, I2, I4, I4rt, Fp=Fp,
+                    model_type=model_type, plane_mode=plane_mode,
+                    A_m=A_m, B_m=B_m, C_m=C_m)
+                if not np.any(np.isnan(P_new)) and not np.any(np.isnan(K4_new)) and np.all(Je_try > 1e-4):
+                    F = F_try
+                    P, K4, F33 = P_new, K4_new, F33_new
+                    success_step = True
+                    break
+            except Exception:
+                pass
+        
+        if not success_step:
             break
-
-        F = F_new
-        P, K4, F33 = P_new, K4_new, F33_new
 
         # Step 5: update auxiliary stress  λ ← P
         lam = P.copy()
 
-        # Step 6: convergence check  ||G:P|| / (||P|| + ε)
+        # Step 6: convergence check
         GP = G_op(P)
-        res = np.linalg.norm(GP) / (np.linalg.norm(P) + 1e-20)
+        res = np.linalg.norm(GP) / (np.sqrt(GP.size) * (np.mean(np.abs(P)) + 1e-20))
         if res < tol and i > 0:
             return F, P, K4, F33, i + 1
 
-    return F, P, K4, F33, max_iter
+    # If the loop finishes without returning, it means it didn't converge or broke
+    GP = G_op(P)
+    res = np.linalg.norm(GP) / (np.sqrt(GP.size) * (np.mean(np.abs(P)) + 1e-20))
+    raise ValueError(f"AL solver did not converge or exploded. Final relative residual: {res:.2e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1329,27 +1365,48 @@ def _al_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
         phi = lam - _ddot42_3d(L0_field, F)
         dF  = -G_op(phi)
 
-        F_new = F + dF
-        DbarF = F_bar - F_new.mean(axis=(2, 3, 4))
-        F_new = F_new + np.einsum('ij,xyz->ijxyz', DbarF, np.ones((nx, ny, nz)))
-
-        P_new, K4_new = constitutive_hyperelastic_3d(
-            F_new, C4, I2, I4, I4rt, Fp=Fp,
-            model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
-
-        if np.any(np.isnan(P_new)):
+        success_step = False
+        for beta in [1.0, 0.5, 0.25, 0.125, 0.0625]:
+            F_try = F + beta * dF
+            DbarF = F_bar - F_try.mean(axis=(2, 3, 4))
+            F_try = F_try + np.einsum('ij,xyz->ijxyz', DbarF, np.ones((nx, ny, nz)))
+            
+            if Fp_inv is not None:
+                Fe_try = np.einsum('ijxyz,jkxyz->ikxyz', F_try, Fp_inv, optimize=True)
+            else:
+                Fe_try = F_try
+            Je_try = (
+                Fe_try[0, 0] * (Fe_try[1, 1] * Fe_try[2, 2] - Fe_try[1, 2] * Fe_try[2, 1]) -
+                Fe_try[0, 1] * (Fe_try[1, 0] * Fe_try[2, 2] - Fe_try[1, 2] * Fe_try[2, 0]) +
+                Fe_try[0, 2] * (Fe_try[1, 0] * Fe_try[2, 1] - Fe_try[1, 1] * Fe_try[2, 0])
+            )
+            
+            try:
+                P_new, K4_new = constitutive_hyperelastic_3d(
+                    F_try, C4, I2, I4, I4rt, Fp=Fp,
+                    model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
+                if not np.any(np.isnan(P_new)) and not np.any(np.isnan(K4_new)) and np.all(Je_try > 1e-4):
+                    F = F_try
+                    P, K4 = P_new, K4_new
+                    success_step = True
+                    break
+            except Exception:
+                pass
+                
+        if not success_step:
             break
 
-        F = F_new
-        P, K4 = P_new, K4_new
         lam = P.copy()
 
         GP = G_op(P)
-        res = np.linalg.norm(GP) / (np.linalg.norm(P) + 1e-20)
+        res = np.linalg.norm(GP) / (np.sqrt(GP.size) * (np.mean(np.abs(P)) + 1e-20))
         if res < tol and i > 0:
             return F, P, K4, i + 1
 
-    return F, P, K4, max_iter
+    # If the loop finishes without returning, it means it didn't converge or broke
+    GP = G_op(P)
+    res = np.linalg.norm(GP) / (np.sqrt(GP.size) * (np.mean(np.abs(P)) + 1e-20))
+    raise ValueError(f"AL solver did not converge or exploded. Final relative residual: {res:.2e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1444,7 +1501,7 @@ def finite_strain_solver_step_2d(
     F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
     driving_component=(0, 0), P_target=None, P_mask=None,
     E_avg=100e9, nu_avg=0.3,
-    tol_NW=1e-5, tol_CG=1e-6, max_NW=20,
+    tol_NW=1e-5, tol_CG=1e-6, max_NW=50,
     tol_macro=1e6, max_iter_macro=20,
     enable_console=True, model_type="svk", plane_mode="plane_strain",
     A_m=0.0, B_m=0.0, C_m=0.0,
@@ -1541,7 +1598,7 @@ def finite_strain_solver_step_2d(
                 dX  = (DbarF_grid + dF) if i_NW == 0 else dF
 
                 alpha = 1.0
-                for _ in range(8):
+                for _ in range(16):
                     F_trial = F_curr + alpha * dX
                     Fe_t = (np.einsum('ijxy,jkxy->ikxy', F_trial, Fp_inv, optimize=True)
                             if Fp_inv is not None else F_trial)
@@ -1559,14 +1616,12 @@ def finite_strain_solver_step_2d(
                     except Exception:
                         alpha *= 0.5
                 else:
-                    F_curr = F_curr + 0.02 * dX
-                    P, K4, F33 = constitutive_hyperelastic_2d(
-                        F_curr, C4, I2, I4, I4rt, Fp=Fp,
-                        model_type=model_type, plane_mode=plane_mode,
-                        A_m=A_m, B_m=B_m, C_m=C_m)
+                    raise ValueError("Newton-CG line search failed to find a valid step.")
 
                 if np.linalg.norm(dFm) / (np.linalg.norm(F_curr) + 1e-20) < tol_NW and i_NW > 0:
                     break
+            else:
+                raise ValueError(f"Newton-CG inner solver did not converge within {max_NW} iterations.")
 
         # --- Shared: compute Cauchy stress, check mixed BCs ---
         Sig_field = cauchy_from_P(P, F_curr, F33=F33)
@@ -1602,8 +1657,8 @@ def finite_strain_solver_step_2d(
         # Next outer iteration starts from the latest converged F
         F_start = F_curr
     else:
-        if enable_console and np.any(P_mask):
-            print(f"  Warning: outer BC loop did not converge (max_err={max_err:.2e} Pa)")
+        if np.any(P_mask):
+            raise ValueError(f"Outer BC loop did not converge after {max_iter_macro} iterations. Final max stress error: {max_err:.2e} Pa (threshold: {tol_macro:.2e} Pa).")
 
     return F_final, P_final, Sig_final, K4_final, F_bar_current
 
@@ -1980,7 +2035,7 @@ def finite_strain_solver_step_3d(
     F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
     driving_component=(0, 0), P_target=None, P_mask=None,
     E_avg=100e9, nu_avg=0.3,
-    tol_NW=1e-5, tol_CG=1e-6, max_NW=20,
+    tol_NW=1e-5, tol_CG=1e-6, max_NW=50,
     tol_macro=1e6, max_iter_macro=20,
     enable_console=True, model_type="svk",
     A_m=0.0, B_m=0.0, C_m=0.0,
@@ -2062,7 +2117,7 @@ def finite_strain_solver_step_3d(
                 dX  = (DbarF_grid + dF) if i_NW == 0 else dF
 
                 alpha = 1.0
-                for _ in range(8):
+                for _ in range(16):
                     F_trial = F_curr + alpha * dX
                     Fe_t = (np.einsum('ijxyz,jkxyz->ikxyz', F_trial, Fp_inv, optimize=True)
                             if Fp_inv is not None else F_trial)
@@ -2081,13 +2136,12 @@ def finite_strain_solver_step_3d(
                     except Exception:
                         alpha *= 0.5
                 else:
-                    F_curr = F_curr + 0.02 * dX
-                    P, K4 = constitutive_hyperelastic_3d(
-                        F_curr, C4, I2, I4, I4rt, Fp=Fp,
-                        model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m)
+                    raise ValueError("Newton-CG line search failed to find a valid step.")
 
                 if np.linalg.norm(dFm) / (np.linalg.norm(F_curr) + 1e-20) < tol_NW and i_NW > 0:
                     break
+            else:
+                raise ValueError(f"Newton-CG inner solver did not converge within {max_NW} iterations.")
 
         # --- Shared: Cauchy stress + mixed BC check ---
         Sig_field = cauchy_from_P_3d(P, F_curr)
@@ -2122,8 +2176,8 @@ def finite_strain_solver_step_3d(
 
         F_start = F_curr
     else:
-        if enable_console and np.any(P_mask):
-            print(f"  Warning: outer BC loop did not converge (max_err={max_err:.2e} Pa)")
+        if np.any(P_mask):
+            raise ValueError(f"Outer BC loop did not converge after {max_iter_macro} iterations. Final max stress error: {max_err:.2e} Pa (threshold: {tol_macro:.2e} Pa).")
 
     return F_final, P_final, Sig_final, K4_final, F_bar_current
 

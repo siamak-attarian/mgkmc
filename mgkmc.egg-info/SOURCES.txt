@@ -1,3 +1,4 @@
+LICENSE
 README.md
 pyproject.toml
 setup.py
@@ -6,8 +7,11 @@ mgkmc/aqs.py
 mgkmc/checkpoint.py
 mgkmc/elasticity.py
 mgkmc/fft.py
+mgkmc/finite_strain_simulator.py
+mgkmc/kmc_simulator.py
+mgkmc/kmc_simulator_functions.py
+mgkmc/linear_elastic_simulator.py
 mgkmc/microstructure.py
-mgkmc/solver.py
 mgkmc.egg-info/PKG-INFO
 mgkmc.egg-info/SOURCES.txt
 mgkmc.egg-info/dependency_links.txt
@@ -28,8 +32,8 @@ mgkmc/stz/update_fft.py
 tests/test_barrier_physics.py
 tests/test_checkpoint.py
 tests/test_directional_softening.py
+tests/test_finite_strain_kmc.py
 tests/test_kmc_sanity.py
 tests/test_plasticity.py
 tests/test_softening.py
-tests/test_uniaxial_helper.py
-tests/test_vectorized.py
+tests/test_thermal.py

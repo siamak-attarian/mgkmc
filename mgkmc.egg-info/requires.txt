@@ -5,3 +5,9 @@ meshio
 pyfftw
 h5py
 numba
+pyyaml
+
+[docs]
+sphinx
+sphinx-rtd-theme
+sphinx-autodoc-typehints

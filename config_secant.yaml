@@ -1,0 +1,54 @@
+# Example Configuration: Secant Elastic Degradation model
+# Units: Stresses in GPa, Strains are dimensionless, Temperature in K
+#
+# This config runs a 2D plane-strain simulation with the nonlinear
+# Secant Elastic Degradation constitutive law:
+#
+#   mu_sec(eps_eq) = mu * [1 - d * (1 - exp(-k * eps_eq))]
+#   sigma = lambda * tr(eps) * I + 2 * mu_sec(eps_eq) * eps
+#
+# Parameters chosen to mimic a metallic glass softening response:
+#   lambda = 40.38 GPa, mu = 26.92 GPa  (E~70 GPa, nu~0.3)
+#   d = 0.5  -> 50% shear modulus reduction at full degradation
+#   k = 50   -> rapid degradation onset ~0.01-0.02 strain
+
+seed: 42
+simulation_type: "linear_elastic"
+
+system:
+  dimensionality: "2d"
+  plane_mode: "plane_strain"
+  strain_assumption: "small_strain"
+  hyperelastic_model: "secant_degradation"   # <-- activates this model
+  nx: 32
+  ny: 32
+  pixel: 0.7    # nm
+  num_threads: 1
+
+material:
+  E:
+    mode: "constant"
+    value: 70.0     # GPa  (used to derive lambda and mu automatically)
+  nu:
+    mode: "constant"
+    value: 0.3
+  # Secant degradation parameters:
+  d: 0.5            # degradation magnitude (0 = linear elastic, 1 = full softening)
+  k: 50.0           # degradation rate (larger -> faster onset)
+
+loading:
+  eps_target: 0.05           # drive to 5% axial strain
+  step_size: 5.0e-4          # 100 steps
+
+boundary_conditions:
+  driving_component: "xx"
+  mixed_targets:
+    yy: 0.0    # transverse stress free
+
+output:
+  directory: "secant_results"
+  enable_console: true
+  enable_summary_log: true
+  enable_global_log: true
+  checkpoint_interval: "none"
+  vtk_interval: "last"

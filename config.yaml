@@ -14,7 +14,8 @@ system:
   dimensionality: "2d" # Options: "2d" or "3d"
   plane_mode: "plane_strain" # Options: "plane_strain" or "plane_stress" (ignored if not 2d)
   strain_assumption: "finite_strain" # Options: "small_strain" or "finite_strain"
-  hyperelastic_model: "svk"          # Options: "svk" or "neo_hookean" (ignored if small_strain)
+  hyperelastic_model: "svk"          # Finite-strain models: "svk", "neo_hookean", "murnaghan"
+                                     # Small-strain nonlinear: "secant_degradation"
   3d_barriers: false                 # Enable fully 3D isotropic STZ eigenstrain directions (default: false)
   nx: 32
   ny: 32
@@ -33,9 +34,15 @@ material:
   nu:
     mode: "constant"
     value: 0.3     # Poisson's ratio
-  A: -100.0       # Third-order constant A (GPa)
-  B: -100.0       # Third-order constant B (GPa)
-  C: -100.0       # Third-order constant C (GPa)
+  A: -100.0       # Third-order constant A (GPa)  [Murnaghan only]
+  B: -100.0       # Third-order constant B (GPa)  [Murnaghan only]
+  C: -100.0       # Third-order constant C (GPa)  [Murnaghan only]
+  # --- Secant Elastic Degradation parameters (used when hyperelastic_model: secant_degradation) ---
+  # lambda and mu can be supplied directly instead of E/nu:
+  #   lambda: 40.38   # First Lame parameter (GPa)
+  #   mu:     26.92   # Undegraded shear modulus (GPa)
+  d: 0.0           # Degradation magnitude (dimensionless, 0=none, 1=full); ignored unless secant_degradation
+  k: 0.0           # Degradation rate (dimensionless, larger=faster softening); ignored unless secant_degradation
 
 # Physics & Softening
 physics:
