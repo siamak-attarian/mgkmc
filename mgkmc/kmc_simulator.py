@@ -3,7 +3,7 @@ import os
 import time
 from scipy.linalg import expm
 from datetime import datetime
-from .linear_elastic_simulator import spectral_solver_2d
+from .linear_elastic_simulator import spectral_solver_2d, spectral_solver_secant_2d
 from .kmc_simulator_functions import (
     compute_rates_2d, select_event_2d, decode_index_2d, stz_catalog_glass_2d,
     compute_barrier_2d, find_unstable_2d, apply_flip_soa_2d, get_barrier_generator_2d
@@ -24,7 +24,8 @@ class KmcSimulation2D:
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
                  strain_assumption="small_strain", hyperelastic_model="svk",
-                 A_m=0.0, B_m=0.0, C_m=0.0, solver="al", stz_mode="simple_shear"):
+                 A_m=0.0, B_m=0.0, C_m=0.0, solver="al", stz_mode="simple_shear",
+                 d=0.0, k=0.0):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
@@ -127,6 +128,8 @@ class KmcSimulation2D:
 
         self.strain_assumption = strain_assumption
         self.hyperelastic_model = hyperelastic_model
+        self.d = d
+        self.k = k
         if self.strain_assumption == "finite_strain":
             self.fast_patching_enabled = False
             from .finite_strain_simulator import _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d
@@ -297,10 +300,20 @@ class KmcSimulation2D:
             
             return sig_mean
         else:
-            self.eps_field, self.sig_field, _, _ = spectral_solver_2d(
-                self.E_field, self.nu_field, eps_macro, eps_plastic=self.eps_plastic,
-                pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
-            )
+            if getattr(self, "hyperelastic_model", "linear") == "secant_degradation":
+                if not hasattr(self, "lam_field"):
+                    from .elasticity import compute_lame_2d
+                    self.lam_field, self.mu_field = compute_lame_2d(self.E_field, self.nu_field, plane_mode=self.plane_mode)
+                self.eps_field, self.sig_field, _, _ = spectral_solver_secant_2d(
+                    self.lam_field, self.mu_field, self.d, self.k,
+                    eps_macro, eps_plastic=self.eps_plastic,
+                    pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
+                )
+            else:
+                self.eps_field, self.sig_field, _, _ = spectral_solver_2d(
+                    self.E_field, self.nu_field, eps_macro, eps_plastic=self.eps_plastic,
+                    pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
+                )
             return self.sig_field.mean(axis=(0,1))
 
     def update_barriers(self):

@@ -589,7 +589,7 @@ def save_checkpoint_3d(path, step, E, nu, eps_field, sig_field, eps_mac, sig_mac
 # ============================================================================
 
 def spectral_solver_secant_2d(lam, mu, d, k,
-                              eps_bar,
+                              eps_bar, eps_plastic=None,
                               max_iter=400, tol=1e-6,
                               verbose=False, pixel=1.0,
                               plane_mode="plane_strain",
@@ -600,16 +600,16 @@ def spectral_solver_secant_2d(lam, mu, d, k,
 
     Constitutive law
     ----------------
-    sigma = lam * tr(eps) * I + 2 * mu_sec(eps_eq) * eps
+    sigma = lam * tr(eps - eps_plastic) * I + 2 * mu_sec(eps_eq) * (eps - eps_plastic)
     mu_sec(eps_eq) = mu * [1 - d * (1 - exp(-k * eps_eq))]
-    eps_eq = von_mises_strain_2d(eps)
+    eps_eq = von_mises_strain_2d(eps - eps_plastic)
 
     Algorithm (nonlinear Moulinec-Suquet fixed-point)
     -------------------------------------------------
     Reference stiffness C^0 = (lam_avg, mu_avg) is held *fixed* (undegraded).
     Each iteration:
-        1. Compute sigma_secant(eps).
-        2. Compute reference stress  sigma^0 = lam_avg*tr(eps)*I + 2*mu_avg*eps.
+        1. Compute sigma_secant(eps - eps_plastic).
+        2. Compute reference stress  sigma^0 = lam_avg*tr(eps - eps_plastic)*I + 2*mu_avg*(eps - eps_plastic).
         3. Polarisation stress  tau = sigma_secant - sigma^0.
         4. Apply Green operator:  eps_tilde = -Gamma^0 * tau.
         5. Update:  eps = eps_bar + eps_tilde  (mean-corrected).
@@ -627,6 +627,8 @@ def spectral_solver_secant_2d(lam, mu, d, k,
         Degradation rate (dimensionless).
     eps_bar : ndarray, shape (2, 2)
         Prescribed macro-average strain.
+    eps_plastic : ndarray or None, shape (nx, ny, 2, 2)
+        Plastic strain tensor field.
     max_iter : int
         Maximum fixed-point iterations (default 400).
     tol : float
@@ -685,14 +687,15 @@ def spectral_solver_secant_2d(lam, mu, d, k,
     I2      = np.eye(2)[None, None, :, :]
 
     for it in range(max_iter):
+        eps_el = eps - eps_plastic if eps_plastic is not None else eps
         # 1. Secant stress
         sig = stress_from_strain_secant_2d(
-            eps, lam, mu, d, k, plane_mode=plane_mode
+            eps_el, lam, mu, d, k, plane_mode=plane_mode
         )
 
-        # 2. Reference stress  sigma^0 = C^0 : eps  (linear, mu = mu_avg)
-        tr_eps = np.trace(eps, axis1=2, axis2=3)[..., None, None]
-        sig0   = lam_avg * tr_eps * I2 + 2.0 * mu_avg * eps
+        # 2. Reference stress  sigma^0 = C^0 : eps_el  (linear, mu = mu_avg)
+        tr_eps = np.trace(eps_el, axis1=2, axis2=3)[..., None, None]
+        sig0   = lam_avg * tr_eps * I2 + 2.0 * mu_avg * eps_el
 
         # 3. Polarisation
         tau = sig - sig0   # (nx, ny, 2, 2)
@@ -732,14 +735,15 @@ def spectral_solver_secant_2d(lam, mu, d, k,
             break
 
     # Final secant stress
-    sig_out  = stress_from_strain_secant_2d(eps, lam, mu, d, k, plane_mode=plane_mode)
+    eps_el = eps - eps_plastic if eps_plastic is not None else eps
+    sig_out  = stress_from_strain_secant_2d(eps_el, lam, mu, d, k, plane_mode=plane_mode)
     eps_macro = eps.mean(axis=(0, 1))
     sig_macro = sig_out.mean(axis=(0, 1))
     return eps, sig_out, eps_macro, sig_macro
 
 
 def spectral_solver_secant_3d(lam, mu, d, k,
-                              eps_bar,
+                              eps_bar, eps_plastic=None,
                               max_iter=400, tol=1e-6,
                               verbose=False, pixel=1.0,
                               Gamma=None, eps_init=None):
@@ -777,10 +781,11 @@ def spectral_solver_secant_3d(lam, mu, d, k,
     I3 = np.eye(3)[None, None, None, :, :]
 
     for it in range(max_iter):
-        sig = stress_from_strain_secant_3d(eps, lam, mu, d, k)
+        eps_el = eps - eps_plastic if eps_plastic is not None else eps
+        sig = stress_from_strain_secant_3d(eps_el, lam, mu, d, k)
 
-        tr_eps = np.trace(eps, axis1=3, axis2=4)[..., None, None]
-        sig0   = lam_avg * tr_eps * I3 + 2.0 * mu_avg * eps
+        tr_eps = np.trace(eps_el, axis1=3, axis2=4)[..., None, None]
+        sig0   = lam_avg * tr_eps * I3 + 2.0 * mu_avg * eps_el
 
         tau = sig - sig0
 
@@ -814,7 +819,8 @@ def spectral_solver_secant_3d(lam, mu, d, k,
         if diff < tol:
             break
 
-    sig_out   = stress_from_strain_secant_3d(eps, lam, mu, d, k)
+    eps_el = eps - eps_plastic if eps_plastic is not None else eps
+    sig_out   = stress_from_strain_secant_3d(eps_el, lam, mu, d, k)
     eps_macro = eps.mean(axis=(0, 1, 2))
     sig_macro = sig_out.mean(axis=(0, 1, 2))
     return eps, sig_out, eps_macro, sig_macro
