@@ -693,9 +693,9 @@ def spectral_solver_secant_2d(lam, mu, d, k,
             eps_el, lam, mu, d, k, plane_mode=plane_mode
         )
 
-        # 2. Reference stress  sigma^0 = C^0 : eps_el  (linear, mu = mu_avg)
-        tr_eps = np.trace(eps_el, axis1=2, axis2=3)[..., None, None]
-        sig0   = lam_avg * tr_eps * I2 + 2.0 * mu_avg * eps_el
+        # 2. Reference stress  sigma^0 = C^0 : eps  (linear, mu = mu_avg)
+        tr_eps = np.trace(eps, axis1=2, axis2=3)[..., None, None]
+        sig0   = lam_avg * tr_eps * I2 + 2.0 * mu_avg * eps
 
         # 3. Polarisation
         tau = sig - sig0   # (nx, ny, 2, 2)
@@ -784,8 +784,8 @@ def spectral_solver_secant_3d(lam, mu, d, k,
         eps_el = eps - eps_plastic if eps_plastic is not None else eps
         sig = stress_from_strain_secant_3d(eps_el, lam, mu, d, k)
 
-        tr_eps = np.trace(eps_el, axis1=3, axis2=4)[..., None, None]
-        sig0   = lam_avg * tr_eps * I3 + 2.0 * mu_avg * eps_el
+        tr_eps = np.trace(eps, axis1=3, axis2=4)[..., None, None]
+        sig0   = lam_avg * tr_eps * I3 + 2.0 * mu_avg * eps
 
         tau = sig - sig0
 

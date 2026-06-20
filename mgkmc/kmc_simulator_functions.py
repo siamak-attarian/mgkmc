@@ -75,7 +75,7 @@ def decode_index_2d(flat_idx, ny, M):
     x = temp // ny
     return x, y, m
 
-def stz_catalog_glass_2d(M, gamma0, stz_mode="simple_shear"):
+def stz_catalog_glass_2d(M, gamma0, stz_mode="pure_shear"):
     """Generate M independent 2x2 STZ modes for 2D.
     If stz_mode is 'pure_shear', generates traditional pure shear (causes exponential scaling in finite strain).
     If stz_mode is 'simple_shear', generates simple shear mapping with the same symmetric part.

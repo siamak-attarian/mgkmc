@@ -176,8 +176,18 @@ class ThermalSimulation:
         self.B_m = B_m
         self.C_m = C_m
         self.solver = solver
-        if self.strain_assumption == "finite_strain":
+
+        # Fast Patching (Predictor-Corrector) Setup
+        self.fast_patching_enabled = fast_patching.get('enabled', False) if fast_patching else False
+        self.patch_radius = fast_patching.get('patch_radius', 3) if fast_patching else 3
+        self.sync_interval = fast_patching.get('sync_interval', 100) if fast_patching else 100
+        self.flips_since_sync = 0
+        self.sigma_macro_unit = None
+
+        if self.strain_assumption == "finite_strain" or self.hyperelastic_model == "secant_degradation":
             self.fast_patching_enabled = False
+
+        if self.strain_assumption == "finite_strain":
             from .finite_strain_simulator import _make_identity_tensors_3d, build_ghat4_3d, build_C4_3d
             self.I2_fs, self.I4_fs, self.I4rt_fs, self.I4s_fs, self.II_fs = _make_identity_tensors_3d(nx, ny, nz)
             Lx, Ly, Lz = nx * pixel, ny * pixel, nz * pixel
@@ -188,12 +198,6 @@ class ThermalSimulation:
             self.F_plastic = np.einsum('ij,xyz->xyzij', np.eye(3), np.ones((nx, ny, nz)))
             self.F_macro = np.eye(3)
 
-        # Fast Patching (Predictor-Corrector) Setup
-        self.fast_patching_enabled = fast_patching.get('enabled', False) if fast_patching else False
-        self.patch_radius = fast_patching.get('patch_radius', 3) if fast_patching else 3
-        self.sync_interval = fast_patching.get('sync_interval', 100) if fast_patching else 100
-        self.flips_since_sync = 0
-        self.sigma_macro_unit = None
         if self.fast_patching_enabled:
             self._precompute_patch_kernels()
 

@@ -202,7 +202,7 @@ def main():
             q_act_temp=phys_conf.get('q_act_temp', 0.37),
             redraw_directions=phys_conf.get('redraw_directions', True),
             redraw_barriers=phys_conf.get('redraw_barriers', True),
-            stz_mode=phys_conf.get('stz_mode', 'simple_shear'),
+            stz_mode=phys_conf.get('stz_mode', 'pure_shear'),
             # nu0, etc. handled below in Dynamics
             
             # Outputs
@@ -231,6 +231,8 @@ def main():
             A_m=A_val,
             B_m=B_val,
             C_m=C_val,
+            d=d_val,
+            k=k_val,
             solver=solver
         )
     else:

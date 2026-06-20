@@ -24,7 +24,7 @@ class KmcSimulation2D:
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
                  strain_assumption="small_strain", hyperelastic_model="svk",
-                 A_m=0.0, B_m=0.0, C_m=0.0, solver="al", stz_mode="simple_shear",
+                 A_m=0.0, B_m=0.0, C_m=0.0, solver="al", stz_mode="pure_shear",
                  d=0.0, k=0.0):
         
         self.nx, self.ny = nx, ny
@@ -130,8 +130,9 @@ class KmcSimulation2D:
         self.hyperelastic_model = hyperelastic_model
         self.d = d
         self.k = k
-        if self.strain_assumption == "finite_strain":
+        if self.strain_assumption == "finite_strain" or self.hyperelastic_model == "secant_degradation":
             self.fast_patching_enabled = False
+        if self.strain_assumption == "finite_strain":
             from .finite_strain_simulator import _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d
             self.I2_fs, self.I4_fs, self.I4rt_fs, self.I4s_fs, self.II_fs = _make_identity_tensors_2d(nx, ny)
             Lx, Ly = nx * pixel, ny * pixel
