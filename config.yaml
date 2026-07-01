@@ -36,7 +36,7 @@ system:
   hyperelastic_model: "svk"       # Elastic model. 
                                   # Finite-strain models: 
                                   #   - "svk" (Saint Venant-Kirchhoff)
-                                  #   - "neo_hookean" (Neo-Hookean)
+                                  #   - "neo_hookean" (Neo-Hookean - 2D only)
                                   #   - "murnaghan" (Murnaghan non-linear elasticity)
                                   # Small-strain models:
                                   #   - "secant_degradation" (Isotropic stiffness degradation)
@@ -63,10 +63,10 @@ system:
 material:
   # Standard elastic property fields (used for constant or heterogeneous generation)
   E:
-    mode: "constant"              # Field generation mode. Options: "constant", "random", "uniform"
+    mode: "constant"              # Field generation mode. Options: "constant", "generated" (correlated field), "file"
     value: 70                     # Young's modulus (GPa)
   nu:
-    mode: "constant"              # Field generation mode. Options: "constant", "random", "uniform"
+    mode: "constant"              # Field generation mode. Options: "constant", "generated" (correlated field), "file"
     value: 0.3                    # Poisson's ratio
     
   # Direct Lame parameters (Can optionally be used/uncommented to override E/nu):
@@ -112,7 +112,7 @@ physics:
 # ------------------------------------------------------------------------------
 # Determines the statistical distribution of initial activation barriers (Q0) in the glass state.
 barriers:
-  type: "gaussian"                # Distribution type. Options: "gaussian", "constant", "weibull"
+  type: "gaussian"                # Distribution type. Options: "gaussian", "rayleigh", "modified_rayleigh", "modified_rayleigh_with_exponential"
   kwargs:
     mean: 2.2                     # Mean activation barrier (eV)
     std: 0.45                     # Standard deviation of barriers (eV)
@@ -182,7 +182,7 @@ output:
   directory: "simulation_results" # Folder name where checkponts, VTK, and logs are saved
   duplicate_directory_action: "delete" # Directory conflict strategy. Options: "delete", "rename", "overwrite"
   
-  checkpoint_interval: "none"     # Interval to save simulation binary checkpoint. Options: integer, "none", "last"
+  checkpoint_interval: "none"     # Interval to save simulation binary checkpoint. Options: integer, "none", "last", "current"
   checkpoint_elastic_only: true   # If true, checkpoints are saved only during global elastic steps (reducing overhead)
   
   enable_save_q: false            # Toggle saving raw spatial state datasets (eigenstrains and barriers)
