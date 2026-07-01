@@ -668,7 +668,13 @@ def main():
         enable_kmc_log=out_conf.get('enable_kmc_log', True),
         track_cascades=out_conf.get('track_cascades', False),
         max_kmc_steps_pct=det_conf.get('max_kmc_steps_pct', 0.3),
-        max_cascade_steps_pct=det_conf.get('max_cascade_steps_pct', 0.3)
+        max_cascade_steps_pct=det_conf.get('max_cascade_steps_pct', 0.3),
+        
+        # Stress drop early stopping parameters
+        stop_on_stress_drop=det_conf.get('stop_on_stress_drop', None),
+        stop_post_drop_steps=det_conf.get('stop_post_drop_steps', 20),
+        ignore_drop_steps=det_conf.get('ignore_drop_steps', 0),
+        stress_drop_lookback=det_conf.get('stress_drop_lookback', 1)
     )
     
     # If the user requested pure linear_elastic analysis, we halt here.
