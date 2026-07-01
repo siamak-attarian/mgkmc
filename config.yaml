@@ -20,7 +20,7 @@ seed: 42                           # Integer seed for deterministic runs (null/e
 # ------------------------------------------------------------------------------
 # Options:
 #   - "kmc": Run the full Kinetic Monte Carlo plastic shear transformation simulation
-#   - "linear_elastic": Establish initial elastic equilibrium and exit immediately
+#   - "elastic": Establish initial elastic equilibrium and exit immediately
 simulation_type: "kmc"
 
 # ------------------------------------------------------------------------------

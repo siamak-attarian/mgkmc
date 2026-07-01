@@ -13,7 +13,7 @@
 #   k = 50   -> rapid degradation onset ~0.01-0.02 strain
 
 seed: 42
-simulation_type: "linear_elastic"
+simulation_type: "elastic"
 
 system:
   dimensionality: "2d"

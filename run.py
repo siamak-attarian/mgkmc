@@ -177,9 +177,9 @@ def main():
     thermostat = therm_conf.get('thermostat', False)
     tau_bath = therm_conf.get('tau_bath', 0.0)
 
-    if simulation_type == "linear_elastic":
+    if simulation_type in ("elastic", "linear_elastic"):
         sim = None
-        print(f"\n'linear_elastic' {dimensionality.upper()} mode selected. Skipping KMC initialization.")
+        print(f"\n'elastic' {dimensionality.upper()} mode selected. Skipping KMC initialization.")
     elif dimensionality == "2d":
         print("Initializing KmcSimulation2D environment...")
         sim = KmcSimulation2D(
@@ -345,7 +345,7 @@ def main():
     print(f"Driving Strain Component: {_drv_lbl}")
     print(f"Target Stresses (Relaxed Components): {_tgt_lbl}")
     
-    if simulation_type == "linear_elastic":
+    if simulation_type in ("elastic", "linear_elastic"):
         if dimensionality == "2d":
             out_dir        = out_conf.get('directory', 'output')
             os.makedirs(out_dir, exist_ok=True)
@@ -677,9 +677,9 @@ def main():
         stress_drop_lookback=det_conf.get('stress_drop_lookback', 1)
     )
     
-    # If the user requested pure linear_elastic analysis, we halt here.
-    if simulation_type == "linear_elastic":
-        print("\n'linear_elastic' mode selected. The simulation will not proceed into plastic yielding.")
+    # If the user requested pure elastic analysis, we halt here.
+    if simulation_type in ("elastic", "linear_elastic"):
+        print("\n'elastic' mode selected. The simulation will not proceed into plastic yielding.")
         print("Initial elastic equilibrium has been established and exported. Exiting.")
         return
     
