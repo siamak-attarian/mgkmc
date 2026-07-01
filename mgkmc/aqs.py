@@ -33,8 +33,8 @@ class ThermalSimulation:
                  max_cascade_steps_pct=0.3, # Stop cascade if steps > this pct of voxels
                  nu0=1e13,                 # Attempt frequency (Hz)
                  q_act_temp=0.37,          # Activation barrier for JT recovery (eV)
-                 instability_mode="cascade", # "cascade" or "kmc"
-                 cascade_timing="none",      # "none", "single", or "per_flip"
+                 cascade_mode=False,
+                 cascade_timing="none",      # "none", or "per_flip"
                  scale_rate_by_volume=True,
                  fast_patching=None,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
@@ -71,7 +71,7 @@ class ThermalSimulation:
         self.max_cascade_steps_pct = max_cascade_steps_pct
         self.nu0 = nu0
         self.q_act_temp = q_act_temp
-        self.instability_mode = instability_mode
+        self.cascade_mode = cascade_mode
         self.cascade_timing = cascade_timing
         self.scale_rate_by_volume = scale_rate_by_volume
 
@@ -679,7 +679,7 @@ class ThermalSimulation:
                   stress_drop_lookback=1,
                   append_logs=False,
                   eps_target=None,
-                  instability_mode="cascade", # "cascade" or "kmc"
+                  cascade_mode=False,
                   cascade_timing="single", # "single" or "per_flip"
                   **kwargs):
         
@@ -790,7 +790,7 @@ class ThermalSimulation:
             _do_logging(step, "cascade", cascade_event_count, cascade_step_flips)
 
         # Initial relaxation (step 0)
-        if self.instability_mode == "cascade":
+        if self.cascade_mode:
             l, f, eps_curr, sig_curr, truncated, stopped_by_eps = self._run_cascade(
                 global_step=0, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
                 eps_target=eps_target, component=component, log_callback=_cascade_log_callback
@@ -831,7 +831,7 @@ class ThermalSimulation:
                 self.update_barriers()
                 
                 # BRANCH: CASCADE vs KMC unstable handling
-                if self.instability_mode == "cascade":
+                if self.cascade_mode:
                     unstable_indices = find_unstable(self.Q, self.stability_threshold)
                     if len(unstable_indices) > 0:
                         v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (not vtk_elastic_only and track_cascades) else None
@@ -853,7 +853,7 @@ class ThermalSimulation:
                 # SHARED: Rate calculation
                 # In 'kmc' mode, compute_rates will include Q <= 0
                 eff_volume = self.volume if self.scale_rate_by_volume else 1.0
-                rates_flat, indices_flat, total_rate = compute_rates(self.Q, eff_volume, self.Tlocal if self.enable_thermal else self.temperature, self.nu0, instability_mode=self.instability_mode)
+                rates_flat, indices_flat, total_rate = compute_rates(self.Q, eff_volume, self.Tlocal if self.enable_thermal else self.temperature, self.nu0, cascade_mode=self.cascade_mode)
                 
                 if total_rate > 0:
                     u = np.random.uniform()
@@ -1036,7 +1036,7 @@ class ThermalSimulation:
                         
                         log_type = "kmc_instab" if is_instab else "kmc"
                         # In KMC mode, cascade counter is 0 as per request
-                        curr_stress_val = _do_logging(step, log_type, 0 if self.instability_mode == "kmc" else cascade_event_count, 1)
+                        curr_stress_val = _do_logging(step, log_type, 0 if not self.cascade_mode else cascade_event_count, 1)
                         total_kmc_steps += 1
                         
                         if is_instab: sequential_kmc_steps += 1
@@ -1067,7 +1067,7 @@ class ThermalSimulation:
             
             converged = True
             if self.strain_assumption == "finite_strain":
-                if self.instability_mode == "cascade":
+                if self.cascade_mode:
                     v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (not vtk_elastic_only and track_cascades) else None
                     l, f, _, sig_M, truncated, stopped_by_eps = self._run_cascade(
                         step, vtk_prefix=v_pfx, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
@@ -1084,7 +1084,7 @@ class ThermalSimulation:
                 # Elastic relaxation loop (Mixed BCs)
                 converged = False
                 for it in range(mixed_max_iter):
-                    if self.instability_mode == "cascade":
+                    if self.cascade_mode:
                         v_pfx = os.path.join(self.output_dir, "vtk_cascade") if (not vtk_elastic_only and track_cascades) else None
                         l, f, _, sig_M, truncated, stopped_by_eps = self._run_cascade(
                             step, vtk_prefix=v_pfx, track_cascades=track_cascades, strain_unit_tensor=strain_unit_tensor,
@@ -1124,7 +1124,7 @@ class ThermalSimulation:
                 print(f"Warning: Mixed loop did not converge at step {step} (Err={max_err:.2e})")
 
             elastic_steps_done += 1
-            curr_stress_val = _do_logging(step, "elastic", 0 if self.instability_mode == "kmc" else cascade_event_count, 0)
+            curr_stress_val = _do_logging(step, "elastic", 0 if not self.cascade_mode else cascade_event_count, 0)
             stress_history.append(curr_stress_val)
              
             if stop_on_stress_drop is not None and not stop_drop_triggered and step > ignore_drop_steps:
@@ -1152,8 +1152,6 @@ class ThermalSimulation:
     
             if enable_save_q and save_q_interval and step % save_q_interval == 0:
                 should_save_q = True
-                if save_q_elastic_only and self.instability_mode != "elastic": # Changed from last_step_type to self.instability_mode
-                    should_save_q = False
                 if should_save_q:
                     np.save(os.path.join(self.output_dir, f"Q_step_{step:06d}.npy"), self.Q)
 

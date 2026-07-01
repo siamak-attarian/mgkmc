@@ -26,7 +26,7 @@ dynamics:
     enabled: true
     patch_radius: 3
     sync_interval: 100
-  instability_mode: cascade
+  cascade_mode: true
   n_steps: 10
   nu0: 1.0e13
   physical_strain_rate: 1.0e7

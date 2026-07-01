@@ -131,9 +131,9 @@ dynamics:
   physical_strain_rate: 1.0e7     # Physical macro strain rate applied to the cell (1/s)
   nu0: 1.0e13                     # Fundamental atomic attempt frequency (Hz)
   
-  instability_mode: "cascade"     # Trigger mode on unstable events. Options:
-                                  #   - "cascade" (athermal avalanches cascade immediately)
-                                  #   - "kmc" (unstable flips are handled sequentially via KMC rates)
+  cascade_mode: false             # Toggle athermal cascade handling. Options:
+                                  #   - true (athermal avalanches cascade immediately)
+                                  #   - false (unstable flips are handled sequentially via KMC rates; default)
                                   
   cascade_timing: "none"          # Time progression during athermal cascade cascades. Options:
                                   #   - "none" (cascades happen instantaneously, time += 0)

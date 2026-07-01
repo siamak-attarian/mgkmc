@@ -17,7 +17,7 @@ class KmcSimulation2D:
                  q_act_temp=0.37, output_dir="output", temperature=0.0,
                  strain_rate=1.0, stability_threshold=0.0, nu0=1e13,
                  plane_mode="plane_strain", fast_patching=None,
-                 instability_mode="cascade", cascade_timing="none", 
+                 cascade_mode=False, cascade_timing="none", 
                  scale_rate_by_volume=True,
                  redraw_directions=True, redraw_barriers=True,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
@@ -71,7 +71,7 @@ class KmcSimulation2D:
         self.sync_interval = fast_patching.get('sync_interval', 100) if fast_patching else 100
         self.flips_since_sync = 0
         self.sigma_macro_unit = None
-        self.instability_mode = instability_mode
+        self.cascade_mode = cascade_mode
         self.cascade_timing = cascade_timing
         self.scale_rate_by_volume = scale_rate_by_volume
         self.redraw_directions = redraw_directions
@@ -619,7 +619,7 @@ class KmcSimulation2D:
                 self.update_barriers()
                 
                 # Instability Handling
-                if self.instability_mode == "cascade":
+                if self.cascade_mode:
                     unstable = find_unstable_2d(self.Q, self.stability_threshold)
                     if len(unstable) > 0:
                         _, f, _, _, _, _ = self._run_cascade(step, component=component)
@@ -633,7 +633,7 @@ class KmcSimulation2D:
                     cascade_event_count = 0
 
                 eff_volume = self.volume if self.scale_rate_by_volume else 1.0
-                rates, indices, total_rate = compute_rates_2d(self.Q, eff_volume, self.Tlocal if self.enable_thermal else self.temperature, self.nu0, instability_mode=self.instability_mode)
+                rates, indices, total_rate = compute_rates_2d(self.Q, eff_volume, self.Tlocal if self.enable_thermal else self.temperature, self.nu0, cascade_mode=self.cascade_mode)
                 if total_rate > 0:
                     t_wait = -np.log(np.random.rand()) / total_rate
                     if t_wait < remaining_time:
@@ -817,7 +817,7 @@ class KmcSimulation2D:
                             return
 
                         total_kmc_steps += 1
-                        _do_logging(step, log_type, 0 if self.instability_mode == "kmc" else cascade_event_count, 1)
+                        _do_logging(step, log_type, 0 if not self.cascade_mode else cascade_event_count, 1)
                         step += 1
                         continue
                 if self.fast_patching_enabled:

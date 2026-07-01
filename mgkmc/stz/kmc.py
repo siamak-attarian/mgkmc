@@ -1,7 +1,7 @@
 import numpy as np
 from numba import jit
 
-def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="cascade"):
+def compute_rates(Q_field, volume, temperature, nu0=1e13, cascade_mode=True):
     """
     Compute KMC rates for all modes (3D version).
     """
@@ -10,10 +10,10 @@ def compute_rates(Q_field, volume, temperature, nu0=1e13, instability_mode="casc
         temperature_arr = np.full((nx, ny, nz), float(temperature))
     else:
         temperature_arr = np.asarray(temperature, dtype=np.float64)
-    return _compute_rates_jit(Q_field, volume, temperature_arr, nu0, instability_mode)
+    return _compute_rates_jit(Q_field, volume, temperature_arr, nu0, cascade_mode)
 
 @jit(nopython=True, cache=True)
-def _compute_rates_jit(Q_field, volume, temperature_arr, nu0=1e13, instability_mode="cascade"):
+def _compute_rates_jit(Q_field, volume, temperature_arr, nu0=1e13, cascade_mode=True):
     """
     JIT core for computing KMC rates with local temperature array (3D).
     """
@@ -27,7 +27,7 @@ def _compute_rates_jit(Q_field, volume, temperature_arr, nu0=1e13, instability_m
             for z in range(nz):
                 for m in range(M):
                     q = Q_field[x,y,z,m]
-                    if instability_mode == "kmc":
+                    if not cascade_mode:
                         # In KMC mode, we pick EVERYTHING (thermal and unstable)
                         count += 1
                     else:
@@ -51,7 +51,7 @@ def _compute_rates_jit(Q_field, volume, temperature_arr, nu0=1e13, instability_m
                      q = Q_field[x,y,z,m]
                      
                      include = False
-                     if instability_mode == "kmc":
+                     if not cascade_mode:
                          include = True
                      elif q > 0:
                          include = True
