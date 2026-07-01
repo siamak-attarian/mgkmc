@@ -105,7 +105,7 @@ physics:
   redraw_directions: true         # If true, re-randomize STZ candidate orientations in a voxel after a flip
   redraw_barriers: true           # If true, draw new baseline initial barriers (Q0) for voxel modes after a flip
   
-  stz_mode: "pure_shear"          # Eigenstrain tensor layout mode. Options: "pure_shear" or "dilatancy"
+  stz_mode: "pure_shear"          # Eigenstrain tensor layout mode. Options: "pure_shear" or "simple_shear"
 
 # ------------------------------------------------------------------------------
 # Barrier Generator
