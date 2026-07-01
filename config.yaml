@@ -1,121 +1,219 @@
-# Simulation Configuration for MGKMC
-# Units: Stresses in GPa, Strains are dimensionless, Temperature in K
-# Energy Barriers in eV, Voxel Size (Pixel) in nm
+# ==============================================================================
+# Simulation Configuration for MGKMC (Multiscale Glass Kinetic Monte Carlo)
+# ==============================================================================
+# Units System:
+#   - Stresses / Elastic Moduli: GPa (automatically converted to Pa in-run if < 1e6)
+#   - Strains: Dimensionless
+#   - Temperature: Kelvin (K)
+#   - Activation Energy / Barriers: Electron-Volts (eV)
+#   - Lengths / Grid Sizes: Nanometers (nm) (voxel size / pixel length)
+#   - Time: Seconds (s)
+# ==============================================================================
 
+# ------------------------------------------------------------------------------
 # RNG Settings
-seed: 42
+# ------------------------------------------------------------------------------
+seed: 42                           # Integer seed for deterministic runs (null/empty for random)
 
+# ------------------------------------------------------------------------------
 # Main Simulation Mode
-# Options: "kmc" (default) or "linear_elastic"
+# ------------------------------------------------------------------------------
+# Options:
+#   - "kmc": Run the full Kinetic Monte Carlo plastic shear transformation simulation
+#   - "linear_elastic": Establish initial elastic equilibrium and exit immediately
 simulation_type: "kmc"
 
-# System Geometry
+# ------------------------------------------------------------------------------
+# System Geometry & Solvers
+# ------------------------------------------------------------------------------
 system:
-  dimensionality: "2d" # Options: "2d" or "3d"
-  plane_mode: "plane_strain" # Options: "plane_strain" or "plane_stress" (ignored if not 2d)
-  strain_assumption: "finite_strain" # Options: "small_strain" or "finite_strain"
-  hyperelastic_model: "svk"          # Finite-strain models: "svk", "neo_hookean", "murnaghan"
-                                     # Small-strain nonlinear: "secant_degradation"
-  3d_barriers: false                 # Enable fully 3D isotropic STZ eigenstrain directions (default: false)
-  nx: 32
-  ny: 32
-  nz: 1
-  pixel: 0.7       # Voxel size (nm)
-  M: 20            # Number of shear orientations per voxel
-  gamma0: 0.14     # Reference strain
-  num_threads: 1   # Number of threads for pyfftw
-  solver: "al"     # Solver for finite strain paths: "al" (Augmented Lagrangian), "newton_cg" (Newton-CG), or "dbfft" (Displacement-Based FFT)
+  dimensionality: "2d"            # System dimension. Options: "2d" or "3d"
+  
+  plane_mode: "plane_strain"      # 2D strain state. Options: "plane_strain" or "plane_stress" (ignored in 3d)
+  
+  strain_assumption: "finite_strain" # Strain kinematics. Options: "small_strain" (linear) or "finite_strain" (large deformation)
+  
+  hyperelastic_model: "svk"       # Elastic model. 
+                                  # Finite-strain models: 
+                                  #   - "svk" (Saint Venant-Kirchhoff)
+                                  #   - "neo_hookean" (Neo-Hookean)
+                                  #   - "murnaghan" (Murnaghan non-linear elasticity)
+                                  # Small-strain models:
+                                  #   - "secant_degradation" (Isotropic stiffness degradation)
+                                  #   - "linear" (Default hookean)
+                                  
+  solver: "al"                    # Non-linear FFT solver for finite strain path. Options:
+                                  #   - "al" (Augmented Lagrangian - robust, recommended)
+                                  #   - "newton_cg" (Newton-CG - fast but sensitive to local failures)
+                                  #   - "dbfft" (Displacement-Based FFT - preconditioned solver)
+                                  
+  3d_barriers: false              # If true, enables fully 3D isotropic STZ eigenstrain catalog directions (default: false)
+  
+  nx: 32                          # Grid dimensions: X direction (number of voxels)
+  ny: 32                          # Grid dimensions: Y direction (number of voxels)
+  nz: 1                           # Grid dimensions: Z direction (set to 1 for 2D, >1 for 3D)
+  pixel: 0.7                      # Voxel width/length/thickness in nanometers (nm)
+  M: 20                           # Number of candidate shear orientations (STZ modes) generated per voxel
+  gamma0: 0.14                    # Reference shear strain magnitude for a plastic transformation event
+  num_threads: 1                  # Number of CPU threads for PyFFTW calculations (speed up on large grids)
 
+# ------------------------------------------------------------------------------
 # Material Properties
+# ------------------------------------------------------------------------------
 material:
+  # Standard elastic property fields (used for constant or heterogeneous generation)
   E:
-    mode: "constant"
-    value: 70     # Elastic constant (GPa)
+    mode: "constant"              # Field generation mode. Options: "constant", "random", "uniform"
+    value: 70                     # Young's modulus (GPa)
   nu:
-    mode: "constant"
-    value: 0.3     # Poisson's ratio
-  A: -100.0       # Third-order constant A (GPa)  [Murnaghan only]
-  B: -100.0       # Third-order constant B (GPa)  [Murnaghan only]
-  C: -100.0       # Third-order constant C (GPa)  [Murnaghan only]
-  # --- Secant Elastic Degradation parameters (used when hyperelastic_model: secant_degradation) ---
-  # lambda and mu can be supplied directly instead of E/nu:
-  #   lambda: 40.38   # First Lame parameter (GPa)
-  #   mu:     26.92   # Undegraded shear modulus (GPa)
-  d: 0.0           # Degradation magnitude (dimensionless, 0=none, 1=full); ignored unless secant_degradation
-  k: 0.0           # Degradation rate (dimensionless, larger=faster softening); ignored unless secant_degradation
+    mode: "constant"              # Field generation mode. Options: "constant", "random", "uniform"
+    value: 0.3                    # Poisson's ratio
+    
+  # Direct Lame parameters (Can optionally be used/uncommented to override E/nu):
+  # lambda: 40.38                 # First Lame parameter (GPa)
+  # mu: 26.92                     # Shear modulus (GPa)
+  
+  # --- Murnaghan Elasticity Parameters (Third-order elastic constants, GPa) ---
+  # Only used when hyperelastic_model is "murnaghan"
+  A: -100.0                       # Murnaghan coefficient A (GPa)
+  B: -100.0                       # Murnaghan coefficient B (GPa)
+  C: -100.0                       # Murnaghan coefficient C (GPa)
+  
+  # --- Secant Elastic Degradation Parameters ---
+  # Only used when hyperelastic_model is "secant_degradation"
+  d: 0.0                          # Max degradation fraction (0.0 = no degradation, 1.0 = total softening)
+  k: 0.0                          # Degradation rate parameter (larger values lead to faster softening)
 
+# ------------------------------------------------------------------------------
 # Physics & Softening
+# ------------------------------------------------------------------------------
 physics:
-  enable_softening: true
-  softening_scheme: "isotropic"   # "isotropic" or "directional"
-  jp: 20                          # Plastic-to-Softening coupling
-  jt: 0                           # Thermal-to-Softening coupling
-  neighbor_softening_fraction: 0.0 # Fraction of softening applied to the immediate neighbors
-  q_act_temp: 0.37                # Activation barrier for JT recovery (eV)
-  softening_cap: 0.916            # Max local barrier reduction (eV)
-  stability_threshold: 0.0        # Threshold for athermal instability check
-  redraw_directions: true         # Redraw all mode directions in voxel after flip
-  redraw_barriers: true           # Redraw all mode initial barriers (Q0) in voxel after flip
+  enable_softening: true          # Toggle plastic softening behavior following KMC flips
+  
+  softening_scheme: "isotropic"   # Softening decay directional layout. Options:
+                                  #   - "isotropic" (barrier reduction uniform in all directions)
+                                  #   - "directional" (reduction depends on project direction of shear)
+                                  
+  jp: 20                          # Plastic coupling parameter (jp * vm^2) scaling permanent local softening
+  jt: 0                           # Thermal coupling parameter scaling transient/restorative local softening
+  
+  neighbor_softening_fraction: 0.0 # Fraction of plastic softening applied to adjacent voxel neighbors (0.0 to 1.0)
+  q_act_temp: 0.37                # Activation energy barrier for Johari-Goldstein (JG) beta-relaxation/thermal recovery (eV)
+  softening_cap: 0.916            # Maximum allowed local energy barrier reduction (eV)
+  stability_threshold: 0.0        # Energy threshold (eV) below which voxel modes are considered athermally unstable
+  
+  redraw_directions: true         # If true, re-randomize STZ candidate orientations in a voxel after a flip
+  redraw_barriers: true           # If true, draw new baseline initial barriers (Q0) for voxel modes after a flip
+  
+  stz_mode: "pure_shear"          # Eigenstrain tensor layout mode. Options: "pure_shear" or "dilatancy"
 
+# ------------------------------------------------------------------------------
 # Barrier Generator
+# ------------------------------------------------------------------------------
+# Determines the statistical distribution of initial activation barriers (Q0) in the glass state.
 barriers:
-  type: "gaussian"
+  type: "gaussian"                # Distribution type. Options: "gaussian", "constant", "weibull"
   kwargs:
-    mean: 2.2    # eV
-    std: 0.45      # eV
-    min_cutoff: 0.0
+    mean: 2.2                     # Mean activation barrier (eV)
+    std: 0.45                     # Standard deviation of barriers (eV)
+    min_cutoff: 0.0               # Minimum allowed cutoff value for a barrier (eV)
 
+# ------------------------------------------------------------------------------
 # Simulation Dynamics
+# ------------------------------------------------------------------------------
 dynamics:
   fast_patching:
-    enabled: false            # Under finite strain, fast patching must be false
-    patch_radius: 3
-    sync_interval: 100
-  temperature: 300.0              # Operating Temperature (K)
-  physical_strain_rate: 1.0e7     # Physical macro strain rate (1/s)
-  nu0: 1.0e13                     # Attempt frequency (Hz)
-  instability_mode: "cascade"     # 'cascade' or 'kmc'
-  cascade_timing: "none"
-  scale_rate_by_volume: false      # Toggle whether to multiply activation rates by voxel volume
+    enabled: false                # Toggle fast FFT local green-function patching. Must be false for finite-strain.
+    patch_radius: 3               # Voxel interaction influence radius for local updates
+    sync_interval: 100            # Step frequency to re-calculate global stress field via full FFT
+    
+  temperature: 300.0              # Operating temperature of the simulation (K)
+  physical_strain_rate: 1.0e7     # Physical macro strain rate applied to the cell (1/s)
+  nu0: 1.0e13                     # Fundamental atomic attempt frequency (Hz)
+  
+  instability_mode: "cascade"     # Trigger mode on unstable events. Options:
+                                  #   - "cascade" (athermal avalanches cascade immediately)
+                                  #   - "kmc" (unstable flips are handled sequentially via KMC rates)
+                                  
+  cascade_timing: "none"          # Time progression during athermal cascade cascades. Options:
+                                  #   - "none" (cascades happen instantaneously, time += 0)
+                                  #   - "single" (cascades add exactly one time-step)
+                                  #   - "per_flip" (each cascade step adds an expected flip time)
+                                  
+  scale_rate_by_volume: false     # If true, scales the KMC rate equations by the voxel volume (nm^3)
 
-# Loading
+# ------------------------------------------------------------------------------
+# Thermal Evolution & Coupling
+# ------------------------------------------------------------------------------
+# Solves the Fourier-space heat equation coupled with local plastic dissipation.
+thermal:
+  enable_thermal: false           # Toggle active local heat generation and diffusion solver (Fourier space)
+  Cp: 420.0                       # Specific heat capacity of the glass matrix (J / kg * K)
+  rho: 6125.0                     # Mass density of the glass (kg / m^3)
+  thermal_diffusivity: 3.0e-6     # Thermal diffusivity (m^2/s)
+  thermal_coords: "pixel"         # Calculation frame. Options: "pixel" or "physical"
+  temperature_cap: 1000.0         # Maximum allowed local temperature (K) to avoid numerical divergence
+  thermostat: false               # Toggle heat-sink coupling to a thermal bath
+  tau_bath: 0.0                   # Bath coupling relaxation time constant (s). If 0, mean temperature is fixed.
+
+# ------------------------------------------------------------------------------
+# Macro Loading & Strain Control
+# ------------------------------------------------------------------------------
 loading:
-  eps_target: 0.05                # Target global macroscopic strain
-  step_size: 2.0e-3               # Strain increment per global elastic loading step (40 steps total for 8% strain)
+  eps_target: 0.05                # Target global macroscopic strain (e.g. 0.05 = 5% strain)
+  step_size: 2.0e-3               # Strain increment per macroscopic loading step (e.g., 2e-3 = 0.2%)
 
+# ------------------------------------------------------------------------------
 # Boundary Conditions
+# ------------------------------------------------------------------------------
 boundary_conditions:
-  driving_component: "xx"         # Driven strain component
-  mixed_targets:                  # Stress targets for non-driven components (GPa)
-    yy: 0.0                       # yy stress free
-  mixed_tol: 1.0                  # Tolerance for stress convergence (MPa)
+  driving_component: "xx"         # Driven loading strain component. Options: "xx", "yy", "xy" (in 2D/3D); "zz", "xz", "yz" (in 3D)
+  
+  mixed_targets:                  # Relaxation stress targets (GPa) for non-driven coordinates (Poisson expansion)
+    yy: 0.0                       # Free lateral expansion in yy (0.0 GPa target stress)
+    # zz: 0.0                     # Free lateral expansion in zz (uncomment if dimensionality is 3d)
+    
+  mixed_tol: 1.0                  # Stress relaxation error tolerance (MPa) for lateral expansion iteration
 
+# ------------------------------------------------------------------------------
 # Output & Logging
+# ------------------------------------------------------------------------------
 output:
-  directory: "simulation_results"
-  duplicate_directory_action: "delete"
-  checkpoint_interval: "none"
-  checkpoint_elastic_only: true
-  enable_save_q: false
-  save_q_interval: 1
-  save_q_elastic_only: true
-  enable_plotting: true
-  enable_console: true
-  summary_filename: "summary_log.txt"
-  enable_summary_log: true
-  enable_global_log: true
-  enable_cascade_log: true
-  enable_kmc_log: true
-  vtk_interval: "last"
-  vtk_elastic_only: true
-  track_cascades: false
-  enable_config_backup: true
+  directory: "simulation_results" # Folder name where checkponts, VTK, and logs are saved
+  duplicate_directory_action: "delete" # Directory conflict strategy. Options: "delete", "rename", "overwrite"
+  
+  checkpoint_interval: "none"     # Interval to save simulation binary checkpoint. Options: integer, "none", "last"
+  checkpoint_elastic_only: true   # If true, checkpoints are saved only during global elastic steps (reducing overhead)
+  
+  enable_save_q: false            # Toggle saving raw spatial state datasets (eigenstrains and barriers)
+  save_q_interval: 1              # Output step interval for state dataset exports
+  save_q_elastic_only: true       # Save state datasets only on elastic loading steps
+  
+  enable_plotting: true           # Enable generation and saving of summary charts/plots (stress-strain curves)
+  enable_console: true            # Toggle print verbosity to terminal during iterations
+  enable_config_backup: true      # Save a backup of this config.yaml file to the output directory
+  
+  # Logging file selectors
+  summary_filename: "summary_log.txt" # Name of the core summary text log file
+  enable_summary_log: true        # Log high-level step results (time, strain, stress, temperature)
+  enable_global_log: true         # Log global elastic and plastic statistics
+  enable_cascade_log: true        # Log avalanche cascade details (flips, volumes, durations)
+  enable_kmc_log: true            # Log rate selection and event queues
+  
+  # VTK/Paraview Output
+  vtk_interval: "last"            # Export grid spatial fields (.vtu). Options: integer (step interval), "none", "last"
+  vtk_elastic_only: true          # Save VTK datasets only on elastic loading steps (strongly recommended to save space)
+  track_cascades: false           # Save sequential VTK files step-by-step *during* a cascade (warning: creates many files)
 
-# Detection Metrics
+# ------------------------------------------------------------------------------
+# Yield & Cascade Detection Metrics
+# ------------------------------------------------------------------------------
 detection:
-  stop_on_stress_drop: 0.20       # Drop fraction to stop
-  stop_post_drop_steps: 20
-  ignore_drop_steps: 10
-  stress_drop_lookback: 10
-  max_cascade_steps_pct: 0.3
-  max_kmc_steps_pct: 0.3
+  stop_on_stress_drop: 0.20       # Stop simulation early if stress drops by this fraction (0.20 = 20% drop from yield peak)
+  stop_post_drop_steps: 20        # Number of buffer steps to execute and log after a stress drop is detected
+  ignore_drop_steps: 10           # Initial loading steps to ignore stress drops (preventing premature exit on transients)
+  stress_drop_lookback: 10        # Rolling window size of steps to evaluate stress drop trends
+  
+  # Cascade avalanche limit controls (prevents infinite loop cascades)
+  max_cascade_steps_pct: 0.3      # Cancel/truncate cascade if flips exceed this fraction of total system voxels
+  max_kmc_steps_pct: 0.3          # Truncate sequential KMC steps if events exceed this fraction of total system voxels
