@@ -1155,7 +1155,7 @@ class ThermalSimulation:
         duration_str = f"\nSimulation Finish Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nTotal Duration: {total_time:.2f} seconds ({int(h):d}h {int(m):02d}m {int(s):02d}s)\n"
         if self._f_summary:
             self._f_summary.write(duration_str)
-        if enable_console_log: print(duration_str)
+        print(duration_str)
         self._close_logs()
 
     def run(self, *args, **kwargs):

@@ -862,7 +862,6 @@ class KmcSimulation2D:
         
         if self._f_summary:
             self._f_summary.write(duration_str)
-        if enable_console_log: 
-            print(duration_str)
+        print(duration_str)
 
         self._close_logs()

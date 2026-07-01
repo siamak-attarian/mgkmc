@@ -253,6 +253,18 @@ def linear_elastic_simulation_2d(
     elif vtk_interval not in [None, "none", "last"] and isinstance(vtk_interval, int) and n_steps % vtk_interval != 0:
         export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
 
+    _total_time = _time.time() - _t0
+    _m, _s = divmod(_total_time, 60)
+    _h, _m = divmod(_m, 60)
+    _duration_str = f"\nSimulation Finish Time: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}\nTotal Duration: {_total_time:.2f} seconds ({int(_h):d}h {int(_m):02d}m {int(_s):02d}s)\n"
+    if _log_f:
+        _log_f.write(_duration_str)
+        _log_f.close()
+    if _glog_f:
+        _glog_f.close()
+    if enable_console:
+        print(_duration_str)
+
     return (np.array(eps_macro_list),
             np.array(sig_macro_list),
             eps_list, sig_list)
@@ -535,8 +547,17 @@ def linear_elastic_simulation_3d(
     elif vtk_interval not in [None, "none", "last"] and isinstance(vtk_interval, int) and n_steps % vtk_interval != 0:
         export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E, nu, pixel, match_matplotlib_orientation=True)
 
-    if _log_f:  _log_f.close()
-    if _glog_f: _glog_f.close()
+    _total_time = _time.time() - _t0
+    _m, _s = divmod(_total_time, 60)
+    _h, _m = divmod(_m, 60)
+    _duration_str = f"\nSimulation Finish Time: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}\nTotal Duration: {_total_time:.2f} seconds ({int(_h):d}h {int(_m):02d}m {int(_s):02d}s)\n"
+    if _log_f:
+        _log_f.write(_duration_str)
+        _log_f.close()
+    if _glog_f:
+        _glog_f.close()
+    if enable_console:
+        print(_duration_str)
 
     return (np.array(eps_macro_list),
             np.array(sig_macro_list),
@@ -1059,8 +1080,17 @@ def secant_elastic_simulation_2d(
         export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E_vtk, nu_vtk, pixel,
                       match_matplotlib_orientation=True)
 
-    if _log_f:  _log_f.close()
-    if _glog_f: _glog_f.close()
+    _total_time = _time.time() - _t0
+    _m, _s = divmod(_total_time, 60)
+    _h, _m = divmod(_m, 60)
+    _duration_str = f"\nSimulation Finish Time: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}\nTotal Duration: {_total_time:.2f} seconds ({int(_h):d}h {int(_m):02d}m {int(_s):02d}s)\n"
+    if _log_f:
+        _log_f.write(_duration_str)
+        _log_f.close()
+    if _glog_f:
+        _glog_f.close()
+    if enable_console:
+        print(_duration_str)
 
     return (np.array(eps_macro_list),
             np.array(sig_macro_list),
@@ -1248,8 +1278,17 @@ def secant_elastic_simulation_3d(
         export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E_vtk, nu_vtk, pixel,
                       match_matplotlib_orientation=True)
 
-    if _log_f:  _log_f.close()
-    if _glog_f: _glog_f.close()
+    _total_time = _time.time() - _t0
+    _m, _s = divmod(_total_time, 60)
+    _h, _m = divmod(_m, 60)
+    _duration_str = f"\nSimulation Finish Time: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}\nTotal Duration: {_total_time:.2f} seconds ({int(_h):d}h {int(_m):02d}m {int(_s):02d}s)\n"
+    if _log_f:
+        _log_f.write(_duration_str)
+        _log_f.close()
+    if _glog_f:
+        _glog_f.close()
+    if enable_console:
+        print(_duration_str)
 
     return (np.array(eps_macro_list),
             np.array(sig_macro_list),
