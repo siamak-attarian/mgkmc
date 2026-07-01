@@ -208,7 +208,7 @@ def linear_elastic_simulation_2d(
         if enable_console:
             print(f"step {s}/{n_steps}: "
                   f"eps_{_comp_lbl}={_eps_drv:.4f}, "
-                  f"sig_{_comp_lbl}={_sig_drv/1e6:.2f} MPa")
+                  f"sig_{_comp_lbl}={_sig_drv/1e9:.4f} GPa")
         if _log_f:
             _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
             _elapsed = _time.time() - _t0
@@ -487,7 +487,7 @@ def linear_elastic_simulation_3d(
         if enable_console:
             print(f"step {s}/{n_steps}: "
                   f"eps_{_comp_lbl}={_eps_drv:.4f}, "
-                  f"sig_{_comp_lbl}={_sig_drv/1e6:.2f} MPa")
+                  f"sig_{_comp_lbl}={_sig_drv/1e9:.4f} GPa")
 
         if _log_f:
             _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1008,7 +1008,7 @@ def secant_elastic_simulation_2d(
         if enable_console:
             print(f"step {s}/{n_steps}: "
                   f"eps_{_comp_lbl}={_eps_drv:.4f}, "
-                  f"sig_{_comp_lbl}={_sig_drv/1e6:.2f} MPa")
+                  f"sig_{_comp_lbl}={_sig_drv/1e9:.4f} GPa")
         if _log_f:
             _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
             _elapsed = _time.time() - _t0
@@ -1196,7 +1196,7 @@ def secant_elastic_simulation_3d(
         if enable_console:
             print(f"step {s}/{n_steps}: "
                   f"eps_{_comp_lbl}={_eps_drv:.4f}, "
-                  f"sig_{_comp_lbl}={_sig_drv/1e6:.2f} MPa")
+                  f"sig_{_comp_lbl}={_sig_drv/1e9:.4f} GPa")
         if _log_f:
             _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
             _elapsed = _time.time() - _t0
