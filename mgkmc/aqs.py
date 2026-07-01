@@ -674,12 +674,17 @@ class ThermalSimulation:
                   save_q_interval=None,
                   save_q_elastic_only=False,
                   max_kmc_steps_pct=0.3,
+                  max_cascade_steps_pct=0.3,
                   ignore_drop_steps=0,
                   stress_drop_lookback=1,
                   append_logs=False,
                   eps_target=None,
                   instability_mode="cascade", # "cascade" or "kmc"
-                  cascade_timing="single"): # "single" or "per_flip"
+                  cascade_timing="single", # "single" or "per_flip"
+                  **kwargs):
+        
+        if max_cascade_steps_pct is not None:
+            self.max_cascade_steps_pct = max_cascade_steps_pct
         
         if stress_drop_component is None:
             stress_drop_component = component
