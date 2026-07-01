@@ -27,7 +27,6 @@ mgkmc/stz/barriers.py
 mgkmc/stz/cascade.py
 mgkmc/stz/catalog.py
 mgkmc/stz/kmc.py
-mgkmc/stz/softening.py
 mgkmc/stz/update_fft.py
 tests/test_barrier_physics.py
 tests/test_checkpoint.py

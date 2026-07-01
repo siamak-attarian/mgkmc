@@ -44,14 +44,6 @@ mgkmc.stz.kmc module
    :show-inheritance:
    :undoc-members:
 
-mgkmc.stz.softening module
---------------------------
-
-.. automodule:: mgkmc.stz.softening
-   :members:
-   :show-inheritance:
-   :undoc-members:
-
 mgkmc.stz.update\_fft module
 ----------------------------
 
