@@ -215,7 +215,6 @@ def main():
             stability_threshold=phys_conf.get('stability_threshold', 0.0),
             fast_patching=dyn_conf.get('fast_patching', None),
             cascade_mode=dyn_conf.get('cascade_mode', dyn_conf.get('instability_mode', 'kmc') == 'cascade'),
-            cascade_timing=dyn_conf.get('cascade_timing', 'none'),
             scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', False),
             
             # Thermal Parameters
@@ -266,7 +265,6 @@ def main():
             strain_rate=float(dyn_conf.get('physical_strain_rate', 1.0e7)),
             nu0=float(dyn_conf.get('nu0', 1.0e13)),
             cascade_mode=dyn_conf.get('cascade_mode', dyn_conf.get('instability_mode', 'kmc') == 'cascade'),
-            cascade_timing=dyn_conf.get('cascade_timing', 'none'),
             scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', True),
             fast_patching=dyn_conf.get('fast_patching', None),
             

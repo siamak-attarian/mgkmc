@@ -17,7 +17,7 @@ class KmcSimulation2D:
                  q_act_temp=0.37, output_dir="output", temperature=0.0,
                  strain_rate=1.0, stability_threshold=0.0, nu0=1e13,
                  plane_mode="plane_strain", fast_patching=None,
-                 cascade_mode=False, cascade_timing="none", 
+                 cascade_mode=False,
                  scale_rate_by_volume=True,
                  redraw_directions=True, redraw_barriers=True,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
@@ -72,7 +72,6 @@ class KmcSimulation2D:
         self.flips_since_sync = 0
         self.sigma_macro_unit = None
         self.cascade_mode = cascade_mode
-        self.cascade_timing = cascade_timing
         self.scale_rate_by_volume = scale_rate_by_volume
         self.redraw_directions = redraw_directions
         self.redraw_barriers = redraw_barriers

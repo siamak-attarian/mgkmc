@@ -135,11 +135,6 @@ dynamics:
                                   #   - true (athermal avalanches cascade immediately)
                                   #   - false (unstable flips are handled sequentially via KMC rates; default)
                                   
-  cascade_timing: "none"          # Time progression during athermal cascade cascades. Options:
-                                  #   - "none" (cascades happen instantaneously, time += 0)
-                                  #   - "single" (cascades add exactly one time-step)
-                                  #   - "per_flip" (each cascade step adds an expected flip time)
-                                  
   scale_rate_by_volume: false     # If true, scales the KMC rate equations by the voxel volume (nm^3)
 
 # ------------------------------------------------------------------------------

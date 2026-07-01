@@ -20,7 +20,6 @@ detection:
   stop_post_drop_steps: 20
   stress_drop_lookback: 10
 dynamics:
-  cascade_timing: none
   eps_target: 0.14
   fast_patching:
     enabled: true

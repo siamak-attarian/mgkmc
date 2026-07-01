@@ -34,7 +34,6 @@ class ThermalSimulation:
                  nu0=1e13,                 # Attempt frequency (Hz)
                  q_act_temp=0.37,          # Activation barrier for JT recovery (eV)
                  cascade_mode=False,
-                 cascade_timing="none",      # "none", or "per_flip"
                  scale_rate_by_volume=True,
                  fast_patching=None,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
@@ -72,7 +71,6 @@ class ThermalSimulation:
         self.nu0 = nu0
         self.q_act_temp = q_act_temp
         self.cascade_mode = cascade_mode
-        self.cascade_timing = cascade_timing
         self.scale_rate_by_volume = scale_rate_by_volume
 
         # Thermal parameters
@@ -568,17 +566,7 @@ class ThermalSimulation:
                                         self.flip_event_history.append((int(global_step), int(local_step), int(ux), int(uy), int(uz), int(um)))
 
                             if step_idx == N:
-                                dt_cascade = 0.0
-                                if self.cascade_timing == "single":
-                                    dt_cascade = 1.0 / self.nu0
-                                elif self.cascade_timing == "per_flip":
-                                    dt_cascade = len(flipped_indices) / self.nu0
-                                
-                                if dt_cascade > 0:
-                                    self.time += dt_cascade
-                                    self.heat_conducting_3d(dt_cascade)
-                                    if strain_unit_tensor is not None:
-                                        self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+                                pass
 
                             self.update_stresses()
                         
@@ -622,20 +610,12 @@ class ThermalSimulation:
                     if track_cascades:
                         self.flip_event_history.append((int(global_step), int(local_step), int(ux), int(uy), int(uz), int(um)))
 
-                dt_cascade = 0.0
-                if self.cascade_timing == "single": dt_cascade = 1.0 / self.nu0
-                elif self.cascade_timing == "per_flip": dt_cascade = len(flipped_indices) / self.nu0
-                
-                if dt_cascade > 0:
-                    self.time += dt_cascade
-                    self.heat_conducting_3d(dt_cascade)
-                    if strain_unit_tensor is not None:
-                        self.eps_macro += strain_unit_tensor * (self.strain_rate * dt_cascade)
+                pass
 
                 self.update_stresses()
             
             if log_callback:
-                log_callback(local_step, n_flipped)
+                log_callback(local_step, len(flipped_indices))
             
             # Check for eps_target after logging
             if eps_target is not None and self.eps_macro[component] >= eps_target:
@@ -680,7 +660,6 @@ class ThermalSimulation:
                   append_logs=False,
                   eps_target=None,
                   cascade_mode=False,
-                  cascade_timing="single", # "single" or "per_flip"
                   **kwargs):
         
         if max_cascade_steps_pct is not None:
