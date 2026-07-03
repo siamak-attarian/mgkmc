@@ -155,6 +155,31 @@ def main():
     d_val = float(mat_conf.get('d', 0.0))
     k_val = float(mat_conf.get('k', 0.0))
 
+    # Load Landau parameters (v1, v2, v3, g1, g2, g3, g4)
+    v1_val = float(mat_conf.get('v1', 0.0))
+    v2_val = float(mat_conf.get('v2', 0.0))
+    v3_val = float(mat_conf.get('v3', 0.0))
+    g1_val = float(mat_conf.get('g1', 0.0))
+    g2_val = float(mat_conf.get('g2', 0.0))
+    g3_val = float(mat_conf.get('g3', 0.0))
+    g4_val = float(mat_conf.get('g4', 0.0))
+
+    # Autoconvert Landau constants to Pa if supplied in GPa (values < 1e6 except 0.0)
+    if abs(v1_val) < 1e6 and v1_val != 0.0:
+        v1_val *= 1e9
+    if abs(v2_val) < 1e6 and v2_val != 0.0:
+        v2_val *= 1e9
+    if abs(v3_val) < 1e6 and v3_val != 0.0:
+        v3_val *= 1e9
+    if abs(g1_val) < 1e6 and g1_val != 0.0:
+        g1_val *= 1e9
+    if abs(g2_val) < 1e6 and g2_val != 0.0:
+        g2_val *= 1e9
+    if abs(g3_val) < 1e6 and g3_val != 0.0:
+        g3_val *= 1e9
+    if abs(g4_val) < 1e6 and g4_val != 0.0:
+        g4_val *= 1e9
+
     # ---------------------------------------------------------
     # 3. Setup Physics & Dynamics
     # ---------------------------------------------------------
@@ -166,6 +191,68 @@ def main():
     bar_type = bar_conf.get('type', 'gaussian')
     bar_kwargs = bar_conf.get('kwargs', {})
     
+    # Softening overrides
+    enable_softening = phys_conf.get('enable_softening', True)
+    jp_val_phys = float(phys_conf.get('jp', 20)) if enable_softening else 0.0
+    jt_val_phys = float(phys_conf.get('jt', 20)) if enable_softening else 0.0
+    if not enable_softening:
+        print("Softening DISABLED manually (jp and jt set to 0.0).")
+    
+    # Resolve output directory and handle duplicate actions
+    output_dir = out_conf.get('directory', 'output')
+    if os.path.exists(output_dir):
+        dup_action = out_conf.get('duplicate_directory_action', 'delete').lower()
+        if dup_action == 'rename':
+            base_dir = output_dir
+            new_dir = f"{base_dir}_old"
+            counter = 1
+            while os.path.exists(new_dir):
+                new_dir = f"{base_dir}_old_{counter}"
+                counter += 1
+            try:
+                os.rename(output_dir, new_dir)
+                print(f"Directory '{output_dir}' already exists. Renamed to '{new_dir}' to preserve old data.")
+            except Exception as e:
+                print(f"Failed to rename duplicate directory: {e}")
+        elif dup_action == 'delete':
+            import shutil
+            print(f"Cleaning output directory: {output_dir}")
+            try:
+                shutil.rmtree(output_dir)
+            except OSError:
+                pass
+
+    if out_conf.get('enable_config_backup', False):
+        import shutil
+        os.makedirs(output_dir, exist_ok=True)
+        shutil.copy(config_path, os.path.join(output_dir, "parameters.yaml"))
+        print(f"Config backed up to {os.path.join(output_dir, 'parameters.yaml')}")
+        
+    def generate_elastic_plot(eps_list, sig_list, comp, out_dir, is_finite=False):
+        if not out_conf.get('enable_plotting', False):
+            return
+        try:
+            import matplotlib.pyplot as plt
+            comp_tup = tuple(comp)
+            if is_finite:
+                strain_xx = [(F[comp_tup] - (1.0 if comp_tup[0] == comp_tup[1] else 0.0)) * 100 for F in eps_list]
+            else:
+                strain_xx = [eps[comp_tup] * 100 for eps in eps_list]
+            stress_xx = [sig[comp_tup] / 1e9 for sig in sig_list]
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(strain_xx, stress_xx, 'b-o', markersize=2)
+            plt.xlabel('Strain (%)')
+            plt.ylabel('Stress (GPa)')
+            plt.title(f"MGKMC Elastic Simulation: {config_path}")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, "stress_strain.png"))
+            plt.close()
+            print(f"Plot generated: {os.path.join(out_dir, 'stress_strain.png')}")
+        except Exception as e:
+            print(f"Plotting failed: {e}")
+
     # Parse Thermal config
     therm_conf = config.get('thermal', {})
     enable_thermal = therm_conf.get('enable_thermal', False)
@@ -194,8 +281,8 @@ def main():
             barrier_kwargs=bar_kwargs,
             
             # Physics Parameters
-            jp=phys_conf.get('jp', 20),
-            jt=phys_conf.get('jt', 20),
+            jp=jp_val_phys,
+            jt=jt_val_phys,
             neighbor_softening_fraction=phys_conf.get('neighbor_softening_fraction', 0.0),
             softening_scheme=phys_conf.get('softening_scheme', 'isotropic'),
             softening_cap=phys_conf.get('softening_cap', 2.0),
@@ -232,7 +319,14 @@ def main():
             C_m=C_val,
             d=d_val,
             k=k_val,
-            solver=solver
+            solver=solver,
+            v1=v1_val,
+            v2=v2_val,
+            v3=v3_val,
+            g1=g1_val,
+            g2=g2_val,
+            g3=g3_val,
+            g4=g4_val
         )
     else:
         print("Initializing 3D ThermalSimulation environment...")
@@ -247,8 +341,8 @@ def main():
             barrier_kwargs=bar_kwargs,
             
             # Physics Parameters
-            jp=phys_conf.get('jp', 20),
-            jt=phys_conf.get('jt', 20),
+            jp=jp_val_phys,
+            jt=jt_val_phys,
             neighbor_softening_fraction=phys_conf.get('neighbor_softening_fraction', 0.0),
             softening_scheme=phys_conf.get('softening_scheme', 'isotropic'),
             softening_cap=phys_conf.get('softening_cap', 2.0),
@@ -265,7 +359,7 @@ def main():
             strain_rate=float(dyn_conf.get('physical_strain_rate', 1.0e7)),
             nu0=float(dyn_conf.get('nu0', 1.0e13)),
             cascade_mode=dyn_conf.get('cascade_mode', dyn_conf.get('instability_mode', 'kmc') == 'cascade'),
-            scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', True),
+            scale_rate_by_volume=dyn_conf.get('scale_rate_by_volume', False),
             fast_patching=dyn_conf.get('fast_patching', None),
             
             # Thermal Parameters
@@ -283,7 +377,14 @@ def main():
             A_m=A_val,
             B_m=B_val,
             C_m=C_val,
-            solver=solver
+            solver=solver,
+            v1=v1_val,
+            v2=v2_val,
+            v3=v3_val,
+            g1=g1_val,
+            g2=g2_val,
+            g3=g3_val,
+            g4=g4_val
         )
 
     # ---------------------------------------------------------
@@ -394,9 +495,17 @@ def main():
                         A_m=A_val,
                         B_m=B_val,
                         C_m=C_val,
-                        solver=solver
+                        solver=solver,
+                        v1=v1_val,
+                        v2=v2_val,
+                        v3=v3_val,
+                        g1=g1_val,
+                        g2=g2_val,
+                        g3=g3_val,
+                        g4=g4_val
                     )
 
+                generate_elastic_plot(F_mac_arr, Sig_mac_arr, component, out_dir, is_finite=True)
                 print(f"2D Finite-Strain simulation completed. "
                       f"Logs written to {out_dir}.")
                 return
@@ -462,8 +571,65 @@ def main():
                             vtk_interval=vtk_val,
                             vtk_path=os.path.join(out_dir, 'step')
                         )
+                    generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
                     print(f"2D Secant Elastic simulation completed. "
                           f"Logs written to {out_dir}.")
+                    return
+
+                elif hyperelastic_model == 'landau':
+                    from mgkmc.linear_elastic_simulator import landau_elastic_simulation_2d
+
+                    # Derive lam/mu from E/nu (or read directly if supplied)
+                    if 'mu' in mat_conf and 'lambda' in mat_conf:
+                        mu_mode, mu_val, mu_params = parse_material_property(mat_conf.get('mu'), 26.92)
+                        lam_mode, lam_val, lam_params  = parse_material_property(mat_conf.get('lambda'), 40.38)
+                        mu_field_sec = generate_field(mu_mode, shape, constant_val=mu_val, params=mu_params)
+                        lam_field_sec = generate_field(lam_mode, shape, constant_val=lam_val, params=lam_params)
+                        if mu_field_sec.mean() < 1e6:
+                            mu_field_sec *= 1e9
+                        if lam_field_sec.mean() < 1e6:
+                            lam_field_sec *= 1e9
+                    else:
+                        # Compute from E, nu (plane-strain convention)
+                        lam_field_sec = E_field * nu_field / ((1.0 + nu_field) * (1.0 - 2.0 * nu_field))
+                        mu_field_sec = E_field / (2.0 * (1.0 + nu_field))
+
+                    target_strain_mask = np.ones((2, 2), dtype=bool)
+                    target_values      = np.zeros((2, 2))
+                    target_strain_mask[component] = True
+                    target_values[component]      = eps_target
+                    for key, val in stress_targets.items():
+                        if key[0] < 2 and key[1] < 2:
+                            target_values[key]      = val
+                            target_strain_mask[key] = False
+
+                    chk_val = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+                    vtk_val = parse_interval(out_conf.get('vtk_interval', 'none'))
+
+                    print(f"\nRunning 2D Landau Elastic Solver ({plane_mode}) for {calculated_n_steps} steps...")
+                    eps_mac_list, sig_mac_list, eps_list, sig_list = \
+                        landau_elastic_simulation_2d(
+                            lam=lam_field_sec, mu=mu_field_sec,
+                            v1=v1_val, v2=v2_val, v3=v3_val,
+                            g1=g1_val, g2=g2_val, g3=g3_val, g4=g4_val,
+                            target_strain_mask=target_strain_mask,
+                            target_values=target_values,
+                            n_steps=calculated_n_steps,
+                            pixel=sys_conf['pixel'],
+                            plane_mode=plane_mode,
+                            store=True,
+                            tol_macro=tol_macro_pa,
+                            log_path=log_path,
+                            global_log_path=global_log_path,
+                            driving_component=component,
+                            enable_console=enable_console,
+                            checkpoint_interval=chk_val,
+                            checkpoint_path=os.path.join(out_dir, 'checkpoint'),
+                            vtk_interval=vtk_val,
+                            vtk_path=os.path.join(out_dir, 'step')
+                        )
+                    generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
+                    print(f"2D Landau Elastic simulation completed. Logs written to {out_dir}.")
                     return
 
                 else:
@@ -506,6 +672,7 @@ def main():
                             vtk_path=os.path.join(out_dir, 'step')
                         )
 
+                    generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
                     print(f"2D Elastic simulation completed. "
                           f"Data output to checkpoints in {out_dir}.")
                     return
@@ -548,9 +715,17 @@ def main():
                         A_m=A_val,
                         B_m=B_val,
                         C_m=C_val,
-                        solver=solver
+                        solver=solver,
+                        v1=v1_val,
+                        v2=v2_val,
+                        v3=v3_val,
+                        g1=g1_val,
+                        g2=g2_val,
+                        g3=g3_val,
+                        g4=g4_val
                     )
 
+                generate_elastic_plot(F_mac_arr, Sig_mac_arr, component, out_dir, is_finite=True)
                 print(f"3D Finite-Strain simulation completed. Logs written to {out_dir}.")
                 return
             else:
@@ -599,7 +774,57 @@ def main():
                             vtk_interval=vtk_val,
                             vtk_path=os.path.join(out_dir, "step")
                         )
+                    generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
                     print(f"3D Secant Elastic simulation completed. Logs written to {out_dir}.")
+                    return
+
+                elif hyperelastic_model == 'landau':
+                    from mgkmc.linear_elastic_simulator import landau_elastic_simulation_3d
+
+                    if 'mu' in mat_conf and 'lambda' in mat_conf:
+                        mu_mode, mu_val, mu_params = parse_material_property(mat_conf.get('mu'), 26.92)
+                        lam_mode, lam_val, lam_params  = parse_material_property(mat_conf.get('lambda'), 40.38)
+                        mu_field_sec = generate_field(mu_mode, shape, constant_val=mu_val, params=mu_params)
+                        lam_field_sec = generate_field(lam_mode, shape, constant_val=lam_val, params=lam_params)
+                        if mu_field_sec.mean() < 1e6:
+                            mu_field_sec *= 1e9
+                        if lam_field_sec.mean() < 1e6:
+                            lam_field_sec *= 1e9
+                    else:
+                        lam_field_sec = E_field * nu_field / ((1.0 + nu_field) * (1.0 - 2.0 * nu_field))
+                        mu_field_sec = E_field / (2.0 * (1.0 + nu_field))
+
+                    target_strain_mask = np.ones((3, 3), dtype=bool)
+                    target_values      = np.zeros((3, 3))
+                    target_strain_mask[component] = True
+                    target_values[component]      = eps_target
+                    for key, val in stress_targets.items():
+                        target_values[key]      = val
+                        target_strain_mask[key] = False
+
+                    print(f"\nRunning 3D Landau Elastic Solver for {calculated_n_steps} steps...")
+                    eps_mac_list, sig_mac_list, eps_list, sig_list = \
+                        landau_elastic_simulation_3d(
+                            lam=lam_field_sec, mu=mu_field_sec,
+                            v1=v1_val, v2=v2_val, v3=v3_val,
+                            g1=g1_val, g2=g2_val, g3=g3_val, g4=g4_val,
+                            target_strain_mask=target_strain_mask,
+                            target_values=target_values,
+                            n_steps=calculated_n_steps,
+                            pixel=sys_conf['pixel'],
+                            store=True,
+                            tol_macro=tol_macro_pa,
+                            log_path=log_path,
+                            global_log_path=global_log_path,
+                            driving_component=component,
+                            enable_console=enable_console,
+                            checkpoint_interval=chk_val,
+                            checkpoint_path=os.path.join(out_dir, "checkpoint"),
+                            vtk_interval=vtk_val,
+                            vtk_path=os.path.join(out_dir, "step")
+                        )
+                    generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
+                    print(f"3D Landau Elastic simulation completed. Logs written to {out_dir}.")
                     return
 
                 else:
@@ -634,6 +859,7 @@ def main():
                         vtk_path=os.path.join(out_dir, "step")
                     )
 
+                    generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
                     print(f"3D Elastic simulation completed. Data output to checkpoints in {out_dir}.")
                     return
         else:
@@ -647,7 +873,7 @@ def main():
         step_size=step_size,
         component=component,
         stress_targets=stress_targets,
-        mixed_tol=float(bc_conf.get('mixed_tol', 1e-4)),
+        mixed_tol=float(bc_conf.get('mixed_tol', 1.0)) * 1e6,
         
         # Output interval setups
         vtk_interval=parse_interval(out_conf.get('vtk_interval', 'none')),
@@ -661,9 +887,9 @@ def main():
         enable_console_log=out_conf.get('enable_console', True),
         summary_filename=out_conf.get('summary_filename', 'summary_log.txt'),
         enable_summary_log=out_conf.get('enable_summary_log', True),
-        enable_global_log=out_conf.get('enable_global_log', True),
-        enable_cascade_log=out_conf.get('enable_cascade_log', True),
-        enable_kmc_log=out_conf.get('enable_kmc_log', True),
+        enable_global_log=out_conf.get('enable_global_log', False),
+        enable_cascade_log=out_conf.get('enable_cascade_log', False),
+        enable_kmc_log=out_conf.get('enable_kmc_log', False),
         track_cascades=out_conf.get('track_cascades', False),
         max_kmc_steps_pct=det_conf.get('max_kmc_steps_pct', 0.3),
         max_cascade_steps_pct=det_conf.get('max_cascade_steps_pct', 0.3),
@@ -681,6 +907,25 @@ def main():
         print("Initial elastic equilibrium has been established and exported. Exiting.")
         return
     
+    # 6. Optional Plotting
+    if out_conf.get('enable_plotting', False):
+        try:
+            import matplotlib.pyplot as plt
+            hist_global = np.array(sim.history_global)
+            if len(hist_global) > 0:
+                plt.figure(figsize=(10, 6))
+                plt.plot(hist_global[:,0]*100, hist_global[:,1], 'b-o', markersize=2)
+                plt.xlabel('Strain (%)')
+                plt.ylabel('Stress (GPa)')
+                plt.title(f"MGKMC Simulation: {config_path}")
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, "stress_strain.png"))
+                plt.close()
+                print(f"Plot generated: {os.path.join(output_dir, 'stress_strain.png')}")
+        except Exception as e:
+            print(f"Plotting failed: {e}")
+
     print("\nSimulation successfully completed via run.py.")
 
 if __name__ == "__main__":

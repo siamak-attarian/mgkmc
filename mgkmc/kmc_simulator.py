@@ -18,14 +18,15 @@ class KmcSimulation2D:
                  strain_rate=1.0, stability_threshold=0.0, nu0=1e13,
                  plane_mode="plane_strain", fast_patching=None,
                  cascade_mode=False,
-                 scale_rate_by_volume=True,
+                 scale_rate_by_volume=False,
                  redraw_directions=True, redraw_barriers=True,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
                  temperature_cap=1000.0, thermostat=False, tau_bath=0.0,
                  strain_assumption="small_strain", hyperelastic_model="svk",
                  A_m=0.0, B_m=0.0, C_m=0.0, solver="al", stz_mode="pure_shear",
-                 d=0.0, k=0.0):
+                 d=0.0, k=0.0,
+                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
@@ -75,6 +76,7 @@ class KmcSimulation2D:
         self.scale_rate_by_volume = scale_rate_by_volume
         self.redraw_directions = redraw_directions
         self.redraw_barriers = redraw_barriers
+        self.enable_kmc_log = False
 
         # Internal Physics Calculation: tau (Relaxation Time)
         if self.temperature > 0:
@@ -129,7 +131,14 @@ class KmcSimulation2D:
         self.hyperelastic_model = hyperelastic_model
         self.d = d
         self.k = k
-        if self.strain_assumption == "finite_strain" or self.hyperelastic_model == "secant_degradation":
+        self.v1 = v1
+        self.v2 = v2
+        self.v3 = v3
+        self.g1 = g1
+        self.g2 = g2
+        self.g3 = g3
+        self.g4 = g4
+        if self.strain_assumption == "finite_strain" or self.hyperelastic_model in ["secant_degradation", "landau", "murnaghan"]:
             self.fast_patching_enabled = False
         if self.strain_assumption == "finite_strain":
             from .finite_strain_simulator import _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d
@@ -243,6 +252,116 @@ class KmcSimulation2D:
         gamma_eff = np.sqrt(0.5 * np.sum(C**2))   # von-Mises equivalent shear
         return max(2, int(np.ceil(gamma_eff / gamma_step)))
 
+    def _apply_small_strain_flips_substepped(self, flipped_events):
+        """
+        Apply one or more STZ flips to the small-strain plastic strain field
+        (self.eps_plastic), sub-stepping the additive eigenstrain increment
+        across N sub-steps and re-solving elastic_run after each. This mirrors
+        the finite_strain sub-stepping scheme (same _min_substeps_for_flip
+        estimate, same escalate-and-retry loop) but for an additive eps_plastic
+        update instead of a multiplicative F_plastic update.
+
+        Needed because the nonlinear (e.g. landau) small-strain solvers use a
+        fixed-point (Lippmann-Schwinger) FFT iteration whose convergence radius
+        can be exceeded by a single large one-shot eigenstrain jump -- applying
+        the jump in smaller increments keeps each elastic_run call within the
+        solver's convergence basin.
+
+        Returns (sig_befores, eps_befores, C_saved) dicts keyed by (x,y) /
+        (x,y,m), for use by the caller's flip_callback.
+        """
+        eps_plastic_backup = self.eps_plastic.copy()
+        eps_field_backup = self.eps_field.copy()
+        sig_field_backup = self.sig_field.copy()
+        soft_prop_backup = self.soft_prop.copy()
+        last_event_time_backup = self.last_event_time.copy()
+        prev_strain_dir_backup = self.prev_strain_dir.copy()
+        catalog_backup = self.catalog.copy()
+        Q0_backup = self.Q0.copy()
+        Tlocal_backup = self.Tlocal.copy()
+
+        N_start = max(self._min_substeps_for_flip(self.catalog[x, y, m]) for x, y, m in flipped_events)
+        N_start = min(N_start, 40)
+
+        success = False
+        sig_befores, eps_befores, C_saved = {}, {}, {}
+        for N in range(N_start, N_start + 20):
+            self.eps_plastic = eps_plastic_backup.copy()
+            self.eps_field = eps_field_backup.copy()
+            self.sig_field = sig_field_backup.copy()
+            self.soft_prop = soft_prop_backup.copy()
+            self.last_event_time = last_event_time_backup.copy()
+            self.prev_strain_dir = prev_strain_dir_backup.copy()
+            self.catalog = catalog_backup.copy()
+            self.Q0 = Q0_backup.copy()
+            self.Tlocal = Tlocal_backup.copy()
+
+            try:
+                sig_befores = {}
+                eps_befores = {}
+                C_saved = {}
+                for x, y, m in flipped_events:
+                    sig_befores[(x, y)] = self.sig_field[x, y].copy()
+                    eps_befores[(x, y)] = self.eps_field[x, y].copy()
+                    C_saved[(x, y, m)] = self.catalog[x, y, m].copy()
+
+                for step_idx in range(1, N + 1):
+                    for x, y, m in flipped_events:
+                        C = self.catalog[x, y, m].copy()
+                        self.eps_plastic[x, y] += C / N
+
+                        if step_idx == N:
+                            e11, e22, e12 = C[0, 0], C[1, 1], C[0, 1]
+                            sum_sq = (e12 ** 2) + (e22 ** 2 + e11 ** 2 + (e11 - e22) ** 2) / 6.0
+                            gp_new = self.soft_prop[x, y, 0] + self.jp * sum_sq
+                            if self.softening_cap > 0 and gp_new > self.softening_cap:
+                                gp_new = self.softening_cap
+                            self.soft_prop[x, y, 0] = gp_new
+                            self.soft_prop[x, y, 1] = self.jt * sum_sq
+                            self.last_event_time[x, y] = self.time
+
+                            if self.neighbor_softening_fraction > 0.0:
+                                nx, ny = self.nx, self.ny
+                                for dx in (-1, 0, 1):
+                                    for dy in (-1, 0, 1):
+                                        if dx == 0 and dy == 0: continue
+                                        nx_n, ny_n = (x + dx + nx) % nx, (y + dy + ny) % ny
+                                        gp_n = self.soft_prop[nx_n, ny_n, 0] + self.neighbor_softening_fraction * self.jp * sum_sq
+                                        if self.softening_cap > 0 and gp_n > self.softening_cap:
+                                            gp_n = self.softening_cap
+                                        self.soft_prop[nx_n, ny_n, 0] = gp_n
+                                        self.soft_prop[nx_n, ny_n, 1] += self.neighbor_softening_fraction * self.jt * sum_sq
+
+                            self.prev_strain_dir[x, y] = C
+
+                            if self.enable_thermal:
+                                DeltaHeat = np.sum(self.sig_field[x, y] * C)
+                                delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
+                                self.Tlocal[x, y] += delta_T
+                                if self.temperature_cap > 0:
+                                    self.Tlocal[x, y] = min(self.Tlocal[x, y], self.temperature_cap)
+
+                            if self.redraw_directions or self.redraw_barriers:
+                                if self.redraw_directions:
+                                    self.catalog[x, y] = stz_catalog_glass_2d(self.M, self.gamma0, stz_mode=self.stz_mode)
+                                if self.redraw_barriers:
+                                    self.Q0[x, y] = self.barrier_generator((self.M,))
+                            else:
+                                self.catalog[x, y, m] = stz_catalog_glass_2d(1, self.gamma0, stz_mode=self.stz_mode)[0]
+                                self.Q0[x, y, m] = self.barrier_generator((1,))[0]
+
+                    self.elastic_run(self.eps_macro)
+
+                success = True
+                break
+            except ValueError as e:
+                print(f"Warning: small-strain sub-stepping with N={N} failed: {e}. Trying N={N+1}...")
+
+        if not success:
+            raise ValueError("Mechanical solver failed to converge under small-strain sub-stepping.")
+
+        return sig_befores, eps_befores, C_saved
+
     def elastic_run(self, eps_macro):
         """Standard 2D elastic equilibrium step, supporting both small and finite strain."""
         if getattr(self, "strain_assumption", "small_strain") == "finite_strain":
@@ -309,12 +428,33 @@ class KmcSimulation2D:
                     eps_macro, eps_plastic=self.eps_plastic,
                     pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
                 )
+            elif getattr(self, "hyperelastic_model", "linear") == "landau":
+                if not hasattr(self, "lam_field"):
+                    from .elasticity import compute_lame_2d
+                    # Always derive the true 3D Lame lambda (plane_strain formula is the
+                    # 3D formula). stress_from_strain_landau_2d performs its own
+                    # out-of-plane (e33) reduction internally when plane_mode is
+                    # "plane_stress", so it must receive the true 3D lambda, not the
+                    # already plane-stress-reduced lambda* = E*nu/(1-nu^2).
+                    self.lam_field, self.mu_field = compute_lame_2d(self.E_field, self.nu_field, plane_mode="plane_strain")
+                from .linear_elastic_simulator import spectral_solver_landau_2d
+                self.eps_field, self.sig_field, _, _ = spectral_solver_landau_2d(
+                    self.lam_field, self.mu_field,
+                    v1=self.v1, v2=self.v2, v3=self.v3,
+                    g1=self.g1, g2=self.g2, g3=self.g3, g4=self.g4,
+                    eps_bar=eps_macro, eps_plastic=self.eps_plastic,
+                    pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
+                )
             else:
                 self.eps_field, self.sig_field, _, _ = spectral_solver_2d(
                     self.E_field, self.nu_field, eps_macro, eps_plastic=self.eps_plastic,
                     pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
                 )
-            return self.sig_field.mean(axis=(0,1))
+
+            sig_mean = self.sig_field.mean(axis=(0,1))
+            if np.any(np.isnan(self.sig_field)) or np.max(np.abs(sig_mean)) / 1e9 > 20.0:
+                raise ValueError(f"Unstable stress in small-strain elastic_run: {sig_mean/1e9} GPa")
+            return sig_mean
 
     def update_barriers(self):
         scheme_idx = 1 if self.softening_scheme == "directional" else 0
@@ -323,6 +463,30 @@ class KmcSimulation2D:
             self.soft_prop, self.last_event_time, self.time, self.prev_strain_dir,
             self.softening_cap, scheme_idx, self.tau
         )
+
+    def _log_flip(self, step, x, y, m, flip_type):
+        g_t = self.soft_prop[x, y, 1]
+        t_last = self.last_event_time[x, y]
+        g_t_curr = 0.0
+        if g_t > 0:
+            if self.tau == np.inf:
+                g_t_curr = g_t
+            elif t_last == -np.inf:
+                g_t_curr = 0.0
+            else:
+                dt = self.time - t_last
+                if dt < 0:
+                    dt = 0
+                g_t_curr = g_t * np.exp(-dt / self.tau)
+        softening = self.soft_prop[x, y, 0] + g_t_curr
+        if self.softening_cap > 0 and softening > self.softening_cap:
+            softening = self.softening_cap
+
+        barrier = self.Q[x, y, m]
+        
+        if getattr(self, 'enable_kmc_log', False):
+            with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'a') as f_log:
+                f_log.write(f"{step:<10d} {x:<6d} {y:<6d} {m:<6d} {softening:<14.6f} {barrier:<18.6f} {flip_type:<10}\n")
 
     def heat_conducting_2d(self, dt):
         """Solve 2D heat equation in Fourier space."""
@@ -477,6 +641,21 @@ class KmcSimulation2D:
                 
                 if not success:
                     raise ValueError("Mechanical solver failed to converge under sub-stepping.")
+            elif self.hyperelastic_model in ("landau", "secant_degradation"):
+                # Nonlinear small-strain models: apply all flips in the batch
+                # incrementally (same rationale as the finite_strain sub-stepping
+                # above), so a large combined eigenstrain jump can't push the
+                # nonlinear FFT solver outside its convergence radius.
+                for x, y, m in flipped_events:
+                    self._log_flip(step, x, y, m, 'cascade')
+
+                sig_befores, eps_befores, C_saved = self._apply_small_strain_flips_substepped(flipped_events)
+
+                if hasattr(self, 'flip_callback'):
+                    for x, y, m in flipped_events:
+                        sig_after = self.sig_field[x, y].copy()
+                        eps_after = self.eps_field[x, y].copy()
+                        self.flip_callback(self, x, y, m, C_saved[(x,y,m)], sig_befores[(x,y)], sig_after, eps_befores[(x,y)], eps_after, 'cascade')
             else:
                 sig_befores = {}
                 eps_befores = {}
@@ -487,18 +666,17 @@ class KmcSimulation2D:
                     C_saved[(x,y,m)] = self.catalog[x, y, m].copy()
 
                 for x, y, m in flipped_events:
-                    with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'a') as f_log:
-                        f_log.write(f"{step},{x},{y},cascade\n")
+                    self._log_flip(step, x, y, m, 'cascade')
                     apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                     self.prev_strain_dir[x, y] = self.catalog[x, y, m].copy()
-                    
+
                     if self.enable_thermal:
                         DeltaHeat = np.sum(self.sig_field[x, y] * self.catalog[x, y, m])
                         delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
                         self.Tlocal[x, y] += delta_T
                         if self.temperature_cap > 0:
                             self.Tlocal[x, y] = min(self.Tlocal[x, y], self.temperature_cap)
-                    
+
                     if self.redraw_directions or self.redraw_barriers:
                         if self.redraw_directions:
                             self.catalog[x, y] = stz_catalog_glass_2d(self.M, self.gamma0, stz_mode=self.stz_mode)
@@ -507,19 +685,19 @@ class KmcSimulation2D:
                     else:
                         self.catalog[x, y, m] = stz_catalog_glass_2d(1, self.gamma0, stz_mode=self.stz_mode)[0]
                         self.Q0[x, y, m] = self.barrier_generator((1,))[0]
-                    
+
                     if self.fast_patching_enabled:
                         gxx, gxy = self.catalog[x, y, m][0,0], self.catalog[x, y, m][0,1]
                         patch = gxx * self.patch_kernels[0] + gxy * self.patch_kernels[1]
                         mean_shift = gxx * self.patch_missing_mean[0] + gxy * self.patch_missing_mean[1]
-                        
+
                         R = self.patch_radius
                         for dx in range(-R, R+1):
                             for dy in range(-R, R+1):
                                 px, py = (x+dx)%self.nx, (y+dy)%self.ny
                                 self.sig_field[px, py] += patch[dx+R, dy+R]
                         self.sig_field += mean_shift
-                
+
                 if not self.fast_patching_enabled:
                     self.elastic_run(self.eps_macro)
 
@@ -546,11 +724,13 @@ class KmcSimulation2D:
                   vtk_interval="none", vtk_elastic_only=True, 
                   track_cascades=False, enable_console_log=True,
                   summary_filename="summary_log.txt", enable_summary_log=True,
-                  enable_global_log=True, max_kmc_steps_pct=0.3, max_cascade_steps_pct=0.3, **kwargs):
+                  enable_global_log=True, max_kmc_steps_pct=0.3, max_cascade_steps_pct=0.3,
+                  enable_kmc_log=False, **kwargs):
         
         self.driving_component = component
         self.stress_targets = stress_targets
         self.last_flip = None
+        self.enable_kmc_log = enable_kmc_log
         
         self._init_logs(summary_filename, enable_summary_log, enable_global_log)
         start_time_total = time.time()
@@ -559,8 +739,9 @@ class KmcSimulation2D:
         max_sequential_kmc = int(max_kmc_steps_pct * self.nx * self.ny)
         max_cascade_limit = int(max_cascade_steps_pct * self.nx * self.ny)
         
-        with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'w') as f_log:
-            f_log.write("Step,X,Y,Type\n")
+        if self.enable_kmc_log:
+            with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'w') as f_log:
+                f_log.write(f"{'Step':<10} {'X':<6} {'Y':<6} {'Mode':<6} {'softening':<14} {'energy barrier':<18} {'Type':<10}\n")
         
         def _do_logging(s, s_type, c_id, c_flips):
             epsM, sigM = self.eps_macro.copy(), self.sig_field.mean(axis=(0,1))
@@ -643,8 +824,7 @@ class KmcSimulation2D:
                         idx_flat = indices[select_event_2d(rates, total_rate)]
                         x, y, m = decode_index_2d(idx_flat, self.ny, self.M)
                         self.last_flip = (x, y, m)
-                        with open(os.path.join(self.output_dir, "flipped_voxels_log.txt"), 'a') as f_log:
-                            f_log.write(f"{step},{x},{y},kmc\n")
+                        self._log_flip(step, x, y, m, 'kmc')
                         
                         is_instab = self.Q[x,y,m] <= self.stability_threshold
                         C = self.catalog[x,y,m].copy()
@@ -744,6 +924,18 @@ class KmcSimulation2D:
 
                             if not success:
                                 raise ValueError("Mechanical solver failed to converge under sub-stepping.")
+                        elif self.hyperelastic_model in ("landau", "secant_degradation"):
+                            # Nonlinear small-strain models: apply the flip incrementally
+                            # (same rationale as the finite_strain sub-stepping above) so a
+                            # single large eigenstrain jump can't push the nonlinear FFT
+                            # solver outside its convergence radius.
+                            sig_before = self.sig_field[x, y].copy()
+                            eps_before = self.eps_field[x, y].copy()
+                            sig_befores, eps_befores, C_saved = self._apply_small_strain_flips_substepped([(x, y, m)])
+                            if hasattr(self, 'flip_callback'):
+                                sig_after = self.sig_field[x, y].copy()
+                                eps_after = self.eps_field[x, y].copy()
+                                self.flip_callback(self, x, y, m, C_saved[(x, y, m)], sig_before, sig_after, eps_before, eps_after, 'kmc')
                         else:
                             sig_before = None
                             eps_before = None
@@ -752,14 +944,14 @@ class KmcSimulation2D:
                                 eps_before = self.eps_field[x, y].copy()
                             apply_flip_soa_2d(self.eps_plastic, self.soft_prop, self.last_event_time, self.catalog, x, y, m, self.time, self.jp, self.jt, self.softening_cap, self.neighbor_softening_fraction)
                             self.prev_strain_dir[x,y] = C
-                            
+
                             if self.enable_thermal:
                                 DeltaHeat = np.sum(self.sig_field[x, y] * C)
                                 delta_T = abs(DeltaHeat) / (self.rho * self.Cp)
                                 self.Tlocal[x, y] += delta_T
                                 if self.temperature_cap > 0:
                                     self.Tlocal[x, y] = min(self.Tlocal[x, y], self.temperature_cap)
-                            
+
                             if self.redraw_directions or self.redraw_barriers:
                                 if self.redraw_directions:
                                     self.catalog[x,y] = stz_catalog_glass_2d(self.M, self.gamma0, stz_mode=self.stz_mode)
@@ -768,7 +960,7 @@ class KmcSimulation2D:
                             else:
                                 self.catalog[x,y,m] = stz_catalog_glass_2d(1, self.gamma0, stz_mode=self.stz_mode)[0]
                                 self.Q0[x,y,m] = self.barrier_generator((1,))[0]
-                            
+
                             if self.fast_patching_enabled:
                                 if self.sigma_macro_unit is None:
                                     _, self.sigma_macro_unit, _, _ = spectral_solver_2d(

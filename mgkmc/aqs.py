@@ -34,7 +34,7 @@ class ThermalSimulation:
                  nu0=1e13,                 # Attempt frequency (Hz)
                  q_act_temp=0.37,          # Activation barrier for JT recovery (eV)
                  cascade_mode=False,
-                 scale_rate_by_volume=True,
+                 scale_rate_by_volume=False,
                  fast_patching=None,
                  enable_thermal=False, Cp=420.0, rho=6125.0,
                  thermal_diffusivity=3.0e-6, thermal_coords="pixel",
@@ -43,7 +43,8 @@ class ThermalSimulation:
                  use_3d_barriers=False,
                  hyperelastic_model="svk",
                  A_m=0.0, B_m=0.0, C_m=0.0,
-                 solver="al"
+                 solver="al",
+                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -174,6 +175,13 @@ class ThermalSimulation:
         self.B_m = B_m
         self.C_m = C_m
         self.solver = solver
+        self.v1 = v1
+        self.v2 = v2
+        self.v3 = v3
+        self.g1 = g1
+        self.g2 = g2
+        self.g3 = g3
+        self.g4 = g4
 
         # Fast Patching (Predictor-Corrector) Setup
         self.fast_patching_enabled = fast_patching.get('enabled', False) if fast_patching else False
@@ -182,7 +190,7 @@ class ThermalSimulation:
         self.flips_since_sync = 0
         self.sigma_macro_unit = None
 
-        if self.strain_assumption == "finite_strain" or self.hyperelastic_model == "secant_degradation":
+        if self.strain_assumption == "finite_strain" or self.hyperelastic_model in ["secant_degradation", "landau", "murnaghan"]:
             self.fast_patching_enabled = False
 
         if self.strain_assumption == "finite_strain":
@@ -304,9 +312,21 @@ class ThermalSimulation:
                 print("="*80 + "\n")
                 raise ValueError(f"Simulation stopped due to unstable stress: {sig_mean/1e9} GPa")
         else:
-            self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
-                self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
-            )
+            if getattr(self, "hyperelastic_model", "linear") == "landau":
+                from .linear_elastic_simulator import spectral_solver_landau_3d
+                from .elasticity import compute_lame_3d
+                lam_field, mu_field = compute_lame_3d(self.E, self.nu)
+                self.eps_field, self.sig_field, _, _ = spectral_solver_landau_3d(
+                    lam_field, mu_field,
+                    v1=self.v1, v2=self.v2, v3=self.v3,
+                    g1=self.g1, g2=self.g2, g3=self.g3, g4=self.g4,
+                    eps_bar=self.eps_macro, eps_plastic=self.eps_plastic,
+                    pixel=self.pixel, **self.solver_args
+                )
+            else:
+                self.eps_field, self.sig_field, _, _ = update_stress_fft_full(
+                    self.eps_plastic, self.eps_macro, self.E, self.nu, pixel=self.pixel, **self.solver_args
+                )
 
     def _init_logs(self, summary_filename="summary_log.txt", 
                    enable_summary_log=True, enable_global_log=True, 
