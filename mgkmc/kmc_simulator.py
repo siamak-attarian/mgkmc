@@ -3,7 +3,7 @@ import os
 import time
 from scipy.linalg import expm
 from datetime import datetime
-from .linear_elastic_simulator import spectral_solver_2d, spectral_solver_secant_2d
+from .linear_elastic_simulator import spectral_solver_2d, spectral_solver_secant_2d, spectral_solver_rose_2d
 from .kmc_simulator_functions import (
     compute_rates_2d, select_event_2d, decode_index_2d, stz_catalog_glass_2d,
     compute_barrier_2d, find_unstable_2d, apply_flip_soa_2d, get_barrier_generator_2d
@@ -26,7 +26,13 @@ class KmcSimulation2D:
                  strain_assumption="small_strain", hyperelastic_model="svk",
                  A_m=0.0, B_m=0.0, C_m=0.0, solver="al", stz_mode="pure_shear",
                  d=0.0, k=0.0,
-                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                 eta=5.0, mu_floor_fraction=0.1,
+                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                 strain_capping_enabled=False,
+                 strain_capping_limit=None,
+                 strain_capping_tangent_ratio=0.1,
+                 strain_capping_type="piecewise",
+                 strain_capping_smooth_power=1.0):
         
         self.nx, self.ny = nx, ny
         self.M, self.gamma0 = M, gamma0
@@ -131,6 +137,8 @@ class KmcSimulation2D:
         self.hyperelastic_model = hyperelastic_model
         self.d = d
         self.k = k
+        self.eta = eta
+        self.mu_floor_fraction = mu_floor_fraction
         self.v1 = v1
         self.v2 = v2
         self.v3 = v3
@@ -138,7 +146,12 @@ class KmcSimulation2D:
         self.g2 = g2
         self.g3 = g3
         self.g4 = g4
-        if self.strain_assumption == "finite_strain" or self.hyperelastic_model in ["secant_degradation", "landau", "murnaghan"]:
+        self.strain_capping_enabled = strain_capping_enabled
+        self.strain_capping_limit = strain_capping_limit
+        self.strain_capping_tangent_ratio = strain_capping_tangent_ratio
+        self.strain_capping_type = strain_capping_type
+        self.strain_capping_smooth_power = strain_capping_smooth_power
+        if self.strain_assumption == "finite_strain" or self.hyperelastic_model in ["secant_degradation", "landau", "murnaghan", "rose"]:
             self.fast_patching_enabled = False
         if self.strain_assumption == "finite_strain":
             from .finite_strain_simulator import _make_identity_tensors_2d, build_ghat4_2d, build_C4_2d
@@ -280,12 +293,20 @@ class KmcSimulation2D:
         Q0_backup = self.Q0.copy()
         Tlocal_backup = self.Tlocal.copy()
 
-        N_start = max(self._min_substeps_for_flip(self.catalog[x, y, m]) for x, y, m in flipped_events)
-        N_start = min(N_start, 40)
+        N_heuristic = max(self._min_substeps_for_flip(self.catalog[x, y, m]) for x, y, m in flipped_events)
+        N_heuristic = min(N_heuristic, 40)
+
+        # Optimistic schedule: with strain capping, warm-started solves, and
+        # solver divergence guards, a one-shot application converges in the
+        # common case. Substepping is only a continuation fallback: on failure
+        # jump straight to the heuristic increment count (intermediate N would
+        # most likely fail too), then escalate.
+        schedule = [1]
+        schedule += list(range(max(N_heuristic, 2), max(N_heuristic, 2) + 20))
 
         success = False
         sig_befores, eps_befores, C_saved = {}, {}, {}
-        for N in range(N_start, N_start + 20):
+        for N in schedule:
             self.eps_plastic = eps_plastic_backup.copy()
             self.eps_field = eps_field_backup.copy()
             self.sig_field = sig_field_backup.copy()
@@ -354,8 +375,9 @@ class KmcSimulation2D:
 
                 success = True
                 break
-            except ValueError as e:
-                print(f"Warning: small-strain sub-stepping with N={N} failed: {e}. Trying N={N+1}...")
+            except (ValueError, FloatingPointError) as e:
+                print(f"Warning: small-strain flip application with N={N} "
+                      f"sub-step(s) failed: {e}. Escalating sub-stepping...")
 
         if not success:
             raise ValueError("Mechanical solver failed to converge under small-strain sub-stepping.")
@@ -386,7 +408,13 @@ class KmcSimulation2D:
                 model_type=self.hyperelastic_model,
                 plane_mode=self.plane_mode,
                 A_m=self.A_m, B_m=self.B_m, C_m=self.C_m,
-                solver=self.solver, pixel=self.pixel
+                solver=self.solver, pixel=self.pixel,
+                v1=self.v1, v2=self.v2, v3=self.v3, g1=self.g1, g2=self.g2, g3=self.g3, g4=self.g4,
+                strain_capping_enabled=self.strain_capping_enabled,
+                strain_capping_limit=self.strain_capping_limit,
+                strain_capping_tangent_ratio=self.strain_capping_tangent_ratio,
+                strain_capping_type=self.strain_capping_type,
+                strain_capping_smooth_power=self.strain_capping_smooth_power
             )
             
             self.F_field = np.einsum('ijxy->xyij', F_out)
@@ -428,6 +456,17 @@ class KmcSimulation2D:
                     eps_macro, eps_plastic=self.eps_plastic,
                     pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
                 )
+            elif getattr(self, "hyperelastic_model", "linear") == "rose":
+                if not hasattr(self, "lam_field"):
+                    from .elasticity import compute_lame_2d
+                    # Always derive the true 3D Lame lambda. stress_from_strain_rose_2d performs its own
+                    # out-of-plane (eps_zz) reduction internally when plane_mode is "plane_stress".
+                    self.lam_field, self.mu_field = compute_lame_2d(self.E_field, self.nu_field, plane_mode="plane_strain")
+                self.eps_field, self.sig_field, _, _ = spectral_solver_rose_2d(
+                    self.lam_field, self.mu_field, self.eta, self.mu_floor_fraction,
+                    eps_macro, eps_plastic=self.eps_plastic,
+                    pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
+                )
             elif getattr(self, "hyperelastic_model", "linear") == "landau":
                 if not hasattr(self, "lam_field"):
                     from .elasticity import compute_lame_2d
@@ -438,12 +477,41 @@ class KmcSimulation2D:
                     # already plane-stress-reduced lambda* = E*nu/(1-nu^2).
                     self.lam_field, self.mu_field = compute_lame_2d(self.E_field, self.nu_field, plane_mode="plane_strain")
                 from .linear_elastic_simulator import spectral_solver_landau_2d
+                if not hasattr(self, "_landau_e33_state"):
+                    # Persistent warm-start for the plane-stress e33 Newton solve;
+                    # successive KMC elastic solves see nearly identical fields.
+                    self._landau_e33_state = {}
+                # The reference Green operator depends only on the average Lame
+                # constants of the reference medium, never on heterogeneity or
+                # eigenstrains (those enter through the polarization term each
+                # LS iteration). Rebuild only if the moduli fields ever change
+                # (they are currently fixed for the life of a run); a stale
+                # reference would still converge to the exact solution, only
+                # more slowly.
+                _gamma_ref = (float(self.lam_field.mean()),
+                              float(self.mu_field.mean()))
+                if getattr(self, "_landau_Gamma_ref", None) != _gamma_ref:
+                    from .elasticity import green_operator_2d
+                    from .fft import compute_wave_vectors_2d as _cwv2d
+                    _kx, _ky = _cwv2d(self.nx, self.ny,
+                                      self.nx * self.pixel, self.ny * self.pixel)
+                    self._landau_Gamma = green_operator_2d(_kx, _ky, *_gamma_ref)
+                    self._landau_Gamma_ref = _gamma_ref
                 self.eps_field, self.sig_field, _, _ = spectral_solver_landau_2d(
                     self.lam_field, self.mu_field,
                     v1=self.v1, v2=self.v2, v3=self.v3,
                     g1=self.g1, g2=self.g2, g3=self.g3, g4=self.g4,
                     eps_bar=eps_macro, eps_plastic=self.eps_plastic,
-                    pixel=self.pixel, plane_mode=self.plane_mode, **self.solver_args
+                    pixel=self.pixel, plane_mode=self.plane_mode,
+                    strain_capping_enabled=self.strain_capping_enabled,
+                    strain_capping_limit=self.strain_capping_limit,
+                    strain_capping_tangent_ratio=self.strain_capping_tangent_ratio,
+                    strain_capping_type=self.strain_capping_type,
+                    strain_capping_smooth_power=self.strain_capping_smooth_power,
+                    e33_state=self._landau_e33_state,
+                    Gamma=self._landau_Gamma,
+                    eps_init=self.eps_field,
+                    **self.solver_args
                 )
             else:
                 self.eps_field, self.sig_field, _, _ = spectral_solver_2d(
@@ -549,13 +617,20 @@ class KmcSimulation2D:
                 Tlocal_backup = self.Tlocal.copy()
                 time_backup = self.time
 
-                N_start = 2
+                N_heuristic = 2
                 if len(flipped_events) > 0:
-                    N_start = max(self._min_substeps_for_flip(self.catalog[x, y, m]) for x, y, m in flipped_events)
-                N_start = min(N_start, 40)
+                    N_heuristic = max(self._min_substeps_for_flip(self.catalog[x, y, m]) for x, y, m in flipped_events)
+                N_heuristic = min(N_heuristic, 40)
+
+                # Optimistic schedule: expm(C/N)^N == expm(C) (same generator),
+                # so the final plastic state is independent of N — substepping
+                # is purely a solver-convergence fallback. Try one-shot first;
+                # on failure jump to the heuristic count and escalate.
+                schedule = [1]
+                schedule += list(range(max(N_heuristic, 2), max(N_heuristic, 2) + 20))
 
                 success = False
-                for N in range(N_start, N_start + 20):
+                for N in schedule:
                     self.F_plastic = F_plastic_backup.copy()
                     self.F_field = F_field_backup.copy()
                     self.sig_field = sig_field_backup.copy()
@@ -641,7 +716,7 @@ class KmcSimulation2D:
                 
                 if not success:
                     raise ValueError("Mechanical solver failed to converge under sub-stepping.")
-            elif self.hyperelastic_model in ("landau", "secant_degradation"):
+            elif self.hyperelastic_model in ("landau", "secant_degradation", "rose"):
                 # Nonlinear small-strain models: apply all flips in the batch
                 # incrementally (same rationale as the finite_strain sub-stepping
                 # above), so a large combined eigenstrain jump can't push the
@@ -784,7 +859,7 @@ class KmcSimulation2D:
                 
                 if save_vtk:
                     if not vtk_elastic_only or s_type.upper() in ["ELAST", "INIT"]:
-                        export_to_vtk(os.path.join(self.output_dir, f"step_{s:05d}.vtu"), self.eps_field, self.sig_field, self.E_field, self.nu_field, pixel=self.pixel, Tlocal=self.Tlocal if self.enable_thermal else None)
+                        export_to_vtk(os.path.join(self.output_dir, f"step_{s:05d}.vtu"), self.eps_field, self.sig_field, self.E_field, self.nu_field, pixel=self.pixel, Tlocal=self.Tlocal if self.enable_thermal else None, eps_plastic_field=self.eps_plastic if self.strain_assumption != "finite_strain" else None)
 
         self.elastic_run(self.eps_macro)
         _do_logging(0, "INIT", 0, 0)
@@ -847,11 +922,16 @@ class KmcSimulation2D:
                             Tlocal_backup = self.Tlocal.copy()
                             time_backup = self.time
 
-                            N_start = self._min_substeps_for_flip(C)
-                            N_start = min(N_start, 40)
+                            N_heuristic = min(self._min_substeps_for_flip(C), 40)
+
+                            # Optimistic schedule: expm(C/N)^N == expm(C), so
+                            # the final plastic state is independent of N (see
+                            # the cascade branch above).
+                            schedule = [1]
+                            schedule += list(range(max(N_heuristic, 2), max(N_heuristic, 2) + 20))
 
                             success = False
-                            for N in range(N_start, N_start + 20):
+                            for N in schedule:
                                 self.F_plastic = F_plastic_backup.copy()
                                 self.F_field = F_field_backup.copy()
                                 self.sig_field = sig_field_backup.copy()
@@ -924,7 +1004,7 @@ class KmcSimulation2D:
 
                             if not success:
                                 raise ValueError("Mechanical solver failed to converge under sub-stepping.")
-                        elif self.hyperelastic_model in ("landau", "secant_degradation"):
+                        elif self.hyperelastic_model in ("landau", "secant_degradation", "rose"):
                             # Nonlinear small-strain models: apply the flip incrementally
                             # (same rationale as the finite_strain sub-stepping above) so a
                             # single large eigenstrain jump can't push the nonlinear FFT
@@ -1025,6 +1105,11 @@ class KmcSimulation2D:
             else:
                 E_avg = self.E_field.mean()
                 nu_avg = self.nu_field.mean()
+                # Secant history for stress-controlled components; reset each
+                # elastic step (the driven strain changed in between, which
+                # would pollute a cross-step slope estimate).
+                prev_eps_sc = {}
+                prev_sig_sc = {}
                 for it in range(mixed_max_iter):
                     sigM = self.elastic_run(self.eps_macro)
                     stress_err = np.zeros((2, 2))
@@ -1036,13 +1121,26 @@ class KmcSimulation2D:
                             err_max = max(err_max, abs(err))
                     if err_max < mixed_tol:
                         break
-                    
-                    # Coupled Poisson-corrected correction
+
+                    # Coupled Poisson-corrected correction as the fallback
+                    # slope; per-component secant once two macro iterates
+                    # exist (tracks the softening nonlinear tangent, which
+                    # the fixed linear compliance does not).
                     tr_sig = np.trace(stress_err)
                     d_eps = (stress_err - nu_avg * tr_sig * np.eye(2)) / E_avg
                     for idx in stress_targets.keys():
                         if idx[0] < 2 and idx[1] < 2:
-                            self.eps_macro[idx] += d_eps[idx]
+                            step_eps = d_eps[idx]
+                            if idx in prev_eps_sc:
+                                d_e = self.eps_macro[idx] - prev_eps_sc[idx]
+                                d_s = sigM[idx] - prev_sig_sc[idx]
+                                if abs(d_e) > 1e-14 and np.isfinite(d_s):
+                                    slope = d_s / d_e
+                                    if np.isfinite(slope) and slope > 0.01 * E_avg:
+                                        step_eps = stress_err[idx] / slope
+                            prev_eps_sc[idx] = self.eps_macro[idx]
+                            prev_sig_sc[idx] = sigM[idx]
+                            self.eps_macro[idx] += step_eps
             
             elastic_steps_done += 1
             _do_logging(step, "ELAST", cascade_event_count, 0)

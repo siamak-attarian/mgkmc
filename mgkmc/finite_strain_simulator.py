@@ -28,6 +28,10 @@ import pyfftw.interfaces.numpy_fft as pyfft
 from .analysis.vtk import export_to_vtk
 from .linear_elastic_simulator import save_checkpoint_2d, save_checkpoint_3d
 
+# Cache for the constant broadcast 3D identity tensors used by the Landau
+# branch of constitutive_hyperelastic_2d, keyed on grid shape (see there).
+_ID3D_CACHE_2D = {}
+
 # ---------------------------------------------------------------------------
 # Tensor operations  (layout: [ndim, ndim, nx, ny] — tensor indices FIRST)
 # ---------------------------------------------------------------------------
@@ -296,13 +300,317 @@ def _invert_Fp_3d(Fp):
     return Fp_inv
 
 
+# ---------------------------------------------------------------------------
+# Landau material tangent dS/dE in Mandel notation
+# ---------------------------------------------------------------------------
+# The Landau PK2 stress is  S = A(inv) I + B(inv) E + C(inv) E², so its
+# tangent decomposes into rank-one dyads of symmetric tensors plus the
+# identity and the E-anticommutator operator K_E (K_E : X = E·X + X·E):
+#
+#   dS/dE = α I⊗I + β (I⊗E + E⊗I) + γ (I⊗E² + E²⊗I) + 4g4 E⊗E
+#         + B I4s + C K_E            [+ 2·G_t·w·(I4s - I⊗I/3) when capped]
+#
+#   α = λ + ν1 trE + ½γ1 trE² + γ2 trE², β = 2(ν2 + γ2 trE), γ = 4γ3
+#
+# Because dS/dE has both minor symmetries, it lives entirely in the space of
+# symmetric tensors: in Mandel notation (√2-weighted shear components, an
+# isometry — unlike Voigt) each dyad is an outer product of small vectors and
+# the whole tangent is a 6×6 (3D) or, for the block-diagonal plane states,
+# a 4×4 matrix field over the [11, 22, 33, √2·12] basis. This replaces the
+# five (3,3,3,3,nx,ny) einsum dyads of the reference assembly (~5×81
+# components per pixel) with outer products of 4/6-vectors, and turns the
+# plane-stress condensation into a scalar Schur complement on the 33 slot.
+# Equivalence with the reference path is enforced by
+# tests/test_landau_tangent_mandel.py.
+
+_SQRT2 = np.sqrt(2.0)
+
+
+def _landau_C4eff_mandel_2d(E_GL, E2, trE, trE2, lam,
+                            v1_arr, v2_arr, g1_arr, g2_arr, g3_arr, g4_arr,
+                            B_coef, C_coef, plane_mode,
+                            strain_capping_enabled=False,
+                            G_tangent=None, capping_weight=None):
+    """
+    Mandel-notation assembly of the 2D Landau material tangent.
+
+    E_GL : (3,3,nx,ny) capped Green-Lagrange strain, block-diagonal
+           (in-plane block + E33) — as produced by the 2D constitutive.
+    Returns the in-plane condensed tangent C4_eff (2,2,2,2,nx,ny),
+    numerically equivalent to the reference dyad assembly.
+    """
+    nx, ny = trE.shape
+
+    alpha = lam + v1_arr * trE + 0.5 * g1_arr * (trE**2) + g2_arr * trE2
+    beta  = 2.0 * (v2_arr + g2_arr * trE)
+    gamma = 4.0 * g3_arr
+
+    # Mandel 4-vectors over the (11, 22, 33, √2·12) basis
+    e = np.empty((4, nx, ny))
+    e[0] = E_GL[0, 0]; e[1] = E_GL[1, 1]; e[2] = E_GL[2, 2]
+    e[3] = _SQRT2 * E_GL[0, 1]
+    f = np.empty((4, nx, ny))
+    f[0] = E2[0, 0]; f[1] = E2[1, 1]; f[2] = E2[2, 2]
+    f[3] = _SQRT2 * E2[0, 1]
+    iv = np.zeros((4, 1, 1)); iv[0] = iv[1] = iv[2] = 1.0
+
+    M = (alpha * (iv[:, None] * iv[None, :])
+         + beta * (iv[:, None] * e[None, :] + e[:, None] * iv[None, :])
+         + gamma * (iv[:, None] * f[None, :] + f[:, None] * iv[None, :])
+         + (4.0 * g4_arr) * (e[:, None] * e[None, :]))
+
+    # + B · I4s  (identity on symmetric tensors = Mandel identity)
+    for p in range(4):
+        M[p, p] += B_coef
+
+    # + C · K_E  (K_E : X = E·X + X·E, block-diagonal E)
+    M[0, 0] += C_coef * 2.0 * E_GL[0, 0]
+    M[1, 1] += C_coef * 2.0 * E_GL[1, 1]
+    M[2, 2] += C_coef * 2.0 * E_GL[2, 2]
+    M[3, 3] += C_coef * (E_GL[0, 0] + E_GL[1, 1])
+    s12 = C_coef * _SQRT2 * E_GL[0, 1]
+    M[0, 3] += s12; M[3, 0] += s12
+    M[1, 3] += s12; M[3, 1] += s12
+
+    if strain_capping_enabled:
+        cw = 2.0 * G_tangent * capping_weight
+        for p in range(4):
+            M[p, p] += cw
+        third = cw / 3.0
+        for a in range(3):
+            for b in range(3):
+                M[a, b] -= third
+
+    in_plane = [0, 1, 3]
+    if plane_mode == "plane_stress":
+        # Schur complement on the 33 slot (mirrors the reference, which uses
+        # the C_..33 column for both factors — exact under major symmetry)
+        M33 = np.maximum(1e-14, M[2, 2])
+        m3 = M[:, 2]
+        M3 = M[in_plane][:, in_plane] - \
+             m3[in_plane][:, None] * m3[in_plane][None, :] / M33
+    else:
+        M3 = M[in_plane][:, in_plane]
+
+    # De-Mandelize the in-plane 3×3 block to (2,2,2,2,nx,ny)
+    C4_eff = np.empty((2, 2, 2, 2, nx, ny))
+    inv_s = 1.0 / _SQRT2
+    pairs = [((0, 0), 1.0), ((1, 1), 1.0), ((0, 1), inv_s)]
+    for p, ((i_, j_), wp) in enumerate(pairs):
+        for q, ((k_, l_), wq) in enumerate(pairs):
+            val = M3[p, q] * (wp * wq)
+            C4_eff[i_, j_, k_, l_] = val
+            C4_eff[j_, i_, k_, l_] = val
+            C4_eff[i_, j_, l_, k_] = val
+            C4_eff[j_, i_, l_, k_] = val
+    return C4_eff
+
+
+def _landau_C4eff_mandel_3d(E_GL, E2, trE, trE2, lam,
+                            v1_arr, v2_arr, g1_arr, g2_arr, g3_arr, g4_arr,
+                            B_coef, C_coef,
+                            strain_capping_enabled=False,
+                            G_tangent=None, capping_weight=None):
+    """
+    Mandel-notation assembly of the 3D Landau material tangent for a general
+    symmetric E_GL (3,3,nx,ny,nz). Returns C4_eff (3,3,3,3,nx,ny,nz),
+    numerically equivalent to the reference dyad assembly.
+    """
+    sp = trE.shape  # (nx, ny, nz)
+
+    alpha = lam + v1_arr * trE + 0.5 * g1_arr * (trE**2) + g2_arr * trE2
+    beta  = 2.0 * (v2_arr + g2_arr * trE)
+    gamma = 4.0 * g3_arr
+
+    # Mandel 6-vectors over the (11, 22, 33, √2·23, √2·13, √2·12) basis
+    def to_mandel(T):
+        v = np.empty((6,) + sp)
+        v[0] = T[0, 0]; v[1] = T[1, 1]; v[2] = T[2, 2]
+        v[3] = _SQRT2 * T[1, 2]; v[4] = _SQRT2 * T[0, 2]; v[5] = _SQRT2 * T[0, 1]
+        return v
+
+    e = to_mandel(E_GL)
+    f = to_mandel(E2)
+    iv = np.zeros((6,) + (1,) * len(sp)); iv[0] = iv[1] = iv[2] = 1.0
+
+    M = (alpha * (iv[:, None] * iv[None, :])
+         + beta * (iv[:, None] * e[None, :] + e[:, None] * iv[None, :])
+         + gamma * (iv[:, None] * f[None, :] + f[:, None] * iv[None, :])
+         + (4.0 * g4_arr) * (e[:, None] * e[None, :]))
+
+    for p in range(6):
+        M[p, p] += B_coef
+
+    # + C · K_E for general symmetric E (Mandel matrix of X ↦ E·X + X·E)
+    E11, E22, E33 = E_GL[0, 0], E_GL[1, 1], E_GL[2, 2]
+    E23, E13, E12 = E_GL[1, 2], E_GL[0, 2], E_GL[0, 1]
+    r2 = _SQRT2
+    KE = np.zeros_like(M)
+    KE[0, 0] = 2.0 * E11; KE[1, 1] = 2.0 * E22; KE[2, 2] = 2.0 * E33
+    KE[3, 3] = E22 + E33; KE[4, 4] = E11 + E33; KE[5, 5] = E11 + E22
+    KE[0, 4] = KE[4, 0] = r2 * E13
+    KE[0, 5] = KE[5, 0] = r2 * E12
+    KE[1, 3] = KE[3, 1] = r2 * E23
+    KE[1, 5] = KE[5, 1] = r2 * E12
+    KE[2, 3] = KE[3, 2] = r2 * E23
+    KE[2, 4] = KE[4, 2] = r2 * E13
+    KE[3, 4] = KE[4, 3] = E12
+    KE[3, 5] = KE[5, 3] = E13
+    KE[4, 5] = KE[5, 4] = E23
+    M += C_coef * KE
+
+    if strain_capping_enabled:
+        cw = 2.0 * G_tangent * capping_weight
+        for p in range(6):
+            M[p, p] += cw
+        third = cw / 3.0
+        for a in range(3):
+            for b in range(3):
+                M[a, b] -= third
+
+    # De-Mandelize the 6×6 to (3,3,3,3,...)
+    C4_eff = np.empty((3, 3, 3, 3) + sp)
+    inv_s = 1.0 / _SQRT2
+    pairs = [((0, 0), 1.0), ((1, 1), 1.0), ((2, 2), 1.0),
+             ((1, 2), inv_s), ((0, 2), inv_s), ((0, 1), inv_s)]
+    for p, ((i_, j_), wp) in enumerate(pairs):
+        for q, ((k_, l_), wq) in enumerate(pairs):
+            val = M[p, q] * (wp * wq)
+            C4_eff[i_, j_, k_, l_] = val
+            C4_eff[j_, i_, k_, l_] = val
+            C4_eff[i_, j_, l_, k_] = val
+            C4_eff[j_, i_, l_, k_] = val
+    return C4_eff
+
+
+def _solve_E33_capped_landau_2d(E_GL_2d, E33, lam, mu,
+                                v1_arr, v2_arr, v3_arr,
+                                g1_arr, g2_arr, g3_arr, g4_arr,
+                                strain_capping_limit,
+                                strain_capping_tangent_ratio,
+                                strain_capping_type,
+                                strain_capping_smooth_power):
+    """
+    Plane-stress E33 Newton for the CAPPED landau law.
+
+    Mirrors the small-strain implementation (elasticity.py): the capping map
+    (deviatoric scaling toward E_cap plus the residual-stiffness penalty) is
+    applied inside the Newton residual, so the converged E33 satisfies
+    S33 = 0 for the same capped law the stress section then evaluates.
+    Previously the uncapped root was used and capped pixels violated the
+    plane-stress condition. As in small strain, the derivative omits the
+    cap-factor chain rule (linear convergence in capped pixels), the
+    tolerance is absolute (1e-9 on E33), and non-convergence warns.
+
+    All algebra is scalar per pixel: the strain state is block-diagonal, so
+    the capped invariants follow from Cayley-Hamilton on the in-plane block.
+    """
+    E11 = E_GL_2d[0, 0]
+    E22 = E_GL_2d[1, 1]
+    E12 = E_GL_2d[0, 1]
+
+    g4_val = g4_arr.mean() if isinstance(g4_arr, np.ndarray) else g4_arr
+    mu_val = mu.mean() if isinstance(mu, np.ndarray) else mu
+    if strain_capping_limit is None or strain_capping_limit <= 0:
+        if g4_val < 0:
+            E_cap = np.sqrt(0.2 * mu_val / np.abs(g4_val))
+        else:
+            E_cap = 999.0
+    else:
+        E_cap = strain_capping_limit
+    G_t = strain_capping_tangent_ratio * mu
+
+    for _ in range(20):
+        tr = E11 + E22 + E33
+        tr3 = tr / 3.0
+        d11 = E11 - tr3
+        d22 = E22 - tr3
+        d33 = E33 - tr3
+        E_eq = np.sqrt(np.maximum(
+            0.0, (2.0 / 3.0) * (d11**2 + d22**2 + d33**2 + 2.0 * E12**2)))
+
+        if strain_capping_type == "smooth":
+            p = strain_capping_smooth_power
+            f = np.ones_like(E_eq)
+            nz = E_eq > 1e-12
+            ratio_p = np.minimum(100.0, (E_eq[nz] / E_cap)**p)
+            f[nz] = (E_cap / E_eq[nz]) * np.tanh(ratio_p)**(1.0 / p)
+            w = np.tanh(np.minimum(100.0, (E_eq / E_cap)**p))**2
+        else:
+            is_capped = E_eq > E_cap
+            f = np.ones_like(E_eq)
+            np.divide(E_cap, E_eq, out=f, where=is_capped)
+            w = is_capped.astype(float)
+
+        c11 = f * d11 + tr3
+        c22 = f * d22 + tr3
+        c33 = f * d33 + tr3
+        c12 = f * E12
+        # Invariants of the capped strain (trace-preserving map: I1 = tr)
+        I1 = tr
+        I2_inv = c11**2 + c22**2 + c33**2 + 2.0 * c12**2
+        t2 = c11 + c22
+        det2 = c11 * c22 - c12**2
+        I3_inv = (t2**3 - 3.0 * t2 * det2) + c33**3
+
+        A_coef = lam * I1 + 0.5 * v1_arr * (I1**2) + v2_arr * I2_inv \
+               + (1.0/6.0) * g1_arr * (I1**3) + g2_arr * I1 * I2_inv \
+               + (4.0/3.0) * g3_arr * I3_inv
+        B_coef = 2.0 * (mu + v2_arr * I1 + 0.5 * g2_arr * (I1**2) + g4_arr * I2_inv)
+        C_coef = 4.0 * (v3_arr + g3_arr * I1)
+        S33_landau = A_coef + B_coef * c33 + C_coef * (c33**2)
+
+        dA = lam + v1_arr * I1 + 0.5 * g1_arr * (I1**2) + g2_arr * I2_inv \
+           + 2.0 * (v2_arr + g2_arr * I1) * c33 + 4.0 * g3_arr * (c33**2)
+        dB = 2.0 * (v2_arr + g2_arr * I1) + 4.0 * g4_arr * c33
+        dS33_landau = dA + dB * c33 + B_coef + 4.0 * g3_arr * (c33**2) \
+                    + 2.0 * C_coef * c33
+
+        S33 = S33_landau + 2.0 * G_t * (E33 - c33) * w
+        dS33 = dS33_landau + 2.0 * G_t * w
+
+        delta = -S33 / (dS33 + 1e-12)
+        if not np.all(np.isfinite(delta)):
+            raise FloatingPointError(
+                "constitutive_hyperelastic_2d: non-finite capped E33 Newton "
+                "update (Landau energy likely unstable at this strain).")
+        E33 = E33 + delta
+        if np.max(np.abs(delta)) < 1e-9:
+            break
+    else:
+        import warnings
+        warnings.warn(
+            f"constitutive_hyperelastic_2d: capped E33 Newton not converged "
+            f"in 20 iterations (max|delta| = {np.max(np.abs(delta)):.2e}); "
+            f"S33 = 0 is only approximately satisfied.",
+            RuntimeWarning)
+
+    return E33
+
+
 def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk", plane_mode="plane_strain",
                                  A_m=0.0, B_m=0.0, C_m=0.0,
-                                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                                 strain_capping_enabled=False,
+                                 strain_capping_limit=None,
+                                 strain_capping_tangent_ratio=0.1,
+                                 strain_capping_type="piecewise",
+                                 strain_capping_smooth_power=1.0,
+                                 need_tangent=True,
+                                 tangent_method="mandel"):
     """
     Compute 1st Piola-Kirchhoff stress P and consistent tangent K4 from F,
     supporting an optional plastic deformation gradient field Fp (eigenstrain).
     Supports 'svk', 'neo_hookean', and 'landau' models.
+
+    With need_tangent=False the material-tangent assembly and its geometric
+    push-forward (the dominant cost) are skipped and K4 is returned as None —
+    use for stress-only evaluations (line search, AL iterations, residuals).
+
+    tangent_method="mandel" (default) assembles the landau material tangent
+    in Mandel notation and applies the geometric push-forward with direct
+    index permutations; "reference" keeps the original einsum-dyad assembly
+    as a validation oracle (tests/test_landau_tangent_mandel.py).
     """
     ndim = 2
     
@@ -362,17 +670,19 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
             
             coeff = -mu * x
             S = mu[np.newaxis, np.newaxis, :, :] * I2 + coeff[np.newaxis, np.newaxis, :, :] * invC
-            
-            coeff_tan = mu * x
-            lam_star = (2.0 * lam_3d * coeff_tan) / np.maximum(1e-14, lam_3d + 2.0 * coeff_tan)
-            
-            term1_tan = lam_star[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * \
-                        np.einsum('ijxy,klxy->ijklxy', invC, invC)
-            term2_tan = coeff_tan[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (
-                        np.einsum('ikxy,jlxy->ijklxy', invC, invC) +
-                        np.einsum('ilxy,jkxy->ijklxy', invC, invC)
-            )
-            C4_eff = term1_tan + term2_tan
+
+            C4_eff = None
+            if need_tangent:
+                coeff_tan = mu * x
+                lam_star = (2.0 * lam_3d * coeff_tan) / np.maximum(1e-14, lam_3d + 2.0 * coeff_tan)
+
+                term1_tan = lam_star[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * \
+                            np.einsum('ijxy,klxy->ijklxy', invC, invC)
+                term2_tan = coeff_tan[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (
+                            np.einsum('ikxy,jlxy->ijklxy', invC, invC) +
+                            np.einsum('ilxy,jkxy->ijklxy', invC, invC)
+                )
+                C4_eff = term1_tan + term2_tan
         else:
             # plane_strain: F33 = 1.0, and lam from C4 is the 3D lambda
             lam = C4[0, 0, 1, 1]
@@ -397,15 +707,17 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
             
             coeff = -mu + lam * logJe
             S = mu[np.newaxis, np.newaxis, :, :] * I2 + coeff[np.newaxis, np.newaxis, :, :] * invC
-            
-            coeff_tan = mu - lam * logJe
-            term1_tan = lam[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * \
-                        np.einsum('ijxy,klxy->ijklxy', invC, invC)
-            term2_tan = coeff_tan[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (
-                        np.einsum('ikxy,jlxy->ijklxy', invC, invC) +
-                        np.einsum('ilxy,jkxy->ijklxy', invC, invC)
-            )
-            C4_eff = term1_tan + term2_tan
+
+            C4_eff = None
+            if need_tangent:
+                coeff_tan = mu - lam * logJe
+                term1_tan = lam[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * \
+                            np.einsum('ijxy,klxy->ijklxy', invC, invC)
+                term2_tan = coeff_tan[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (
+                            np.einsum('ikxy,jlxy->ijklxy', invC, invC) +
+                            np.einsum('ilxy,jkxy->ijklxy', invC, invC)
+                )
+                C4_eff = term1_tan + term2_tan
     elif model_type == "landau":
         nx, ny = Fe.shape[2], Fe.shape[3]
         v1_arr = np.full((nx, ny), float(v1)) if isinstance(v1, (int, float, np.number)) else np.array(v1)
@@ -432,19 +744,28 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
         Ce = np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True)
         E_GL_2d = 0.5 * (Ce - I2)
 
-        # Build 3D identity tensors broadcast to (nx, ny)
-        ones_grid = np.ones((nx, ny))
-        i3 = np.eye(3)
-        I2_3d = np.einsum('ij,xy->ijxy', i3, ones_grid)
-        II_3d = np.einsum('ij,kl,xy->ijklxy', i3, i3, ones_grid)
-
-        # 4th-order symmetric identity in 3D
-        I4s_3d = np.zeros((3, 3, 3, 3, nx, ny))
-        for i in range(3):
-            for j in range(3):
-                for k in range(3):
-                    for l in range(3):
-                        I4s_3d[i, j, k, l] = 0.5 * (i3[i, k] * i3[j, l] + i3[i, l] * i3[j, k])
+        # Constant 3D identity tensors broadcast to (nx, ny): cached — these
+        # are (3,3,3,3,nx,ny) fields whose per-call reconstruction (with a
+        # quadruple Python loop) used to be a measurable share of every
+        # constitutive evaluation. Read-only downstream.
+        cache_key = (nx, ny)
+        cached = _ID3D_CACHE_2D.get(cache_key)
+        if cached is None:
+            ones_grid = np.ones((nx, ny))
+            i3 = np.eye(3)
+            I2_3d = np.einsum('ij,xy->ijxy', i3, ones_grid)
+            II_3d = np.einsum('ij,kl,xy->ijklxy', i3, i3, ones_grid)
+            I4s_3d = np.zeros((3, 3, 3, 3, nx, ny))
+            for i in range(3):
+                for j in range(3):
+                    for k in range(3):
+                        for l in range(3):
+                            I4s_3d[i, j, k, l] = 0.5 * (i3[i, k] * i3[j, l] + i3[i, l] * i3[j, k])
+            K_dev_3d = I4s_3d - (1.0 / 3.0) * II_3d
+            _ID3D_CACHE_2D.clear()   # keep at most one grid size resident
+            _ID3D_CACHE_2D[cache_key] = (I2_3d, II_3d, I4s_3d, K_dev_3d)
+        else:
+            I2_3d, II_3d, I4s_3d, K_dev_3d = cached
 
         if plane_mode == "plane_stress":
             # Solve for E33 locally and element-wise such that S33(E33) = 0
@@ -456,29 +777,39 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
             # Initial guess: linear plane stress value
             E33 = - (lam / (lam + 2.0 * mu)) * trE_2d
 
-            for iteration in range(20):
-                I1 = trE_2d + E33
-                I2_inv = trE2_2d + E33**2
-                I3_inv = trE3_2d + E33**3
+            if strain_capping_enabled:
+                # Capping must be resolved inside the Newton residual so the
+                # converged E33 satisfies S33 = 0 for the capped law (mirrors
+                # the small-strain implementation in elasticity.py).
+                E33 = _solve_E33_capped_landau_2d(
+                    E_GL_2d, E33, lam, mu,
+                    v1_arr, v2_arr, v3_arr, g1_arr, g2_arr, g3_arr, g4_arr,
+                    strain_capping_limit, strain_capping_tangent_ratio,
+                    strain_capping_type, strain_capping_smooth_power)
+            else:
+                for iteration in range(20):
+                    I1 = trE_2d + E33
+                    I2_inv = trE2_2d + E33**2
+                    I3_inv = trE3_2d + E33**3
 
-                A_coef = lam * I1 + 0.5 * v1_arr * (I1**2) + v2_arr * I2_inv + (1.0/6.0) * g1_arr * (I1**3) + g2_arr * I1 * I2_inv + (4.0/3.0) * g3_arr * I3_inv
-                B_coef = 2.0 * (mu + v2_arr * I1 + 0.5 * g2_arr * (I1**2) + g4_arr * I2_inv)
-                C_coef = 4.0 * (v3_arr + g3_arr * I1)
+                    A_coef = lam * I1 + 0.5 * v1_arr * (I1**2) + v2_arr * I2_inv + (1.0/6.0) * g1_arr * (I1**3) + g2_arr * I1 * I2_inv + (4.0/3.0) * g3_arr * I3_inv
+                    B_coef = 2.0 * (mu + v2_arr * I1 + 0.5 * g2_arr * (I1**2) + g4_arr * I2_inv)
+                    C_coef = 4.0 * (v3_arr + g3_arr * I1)
 
-                S33 = A_coef + B_coef * E33 + C_coef * (E33**2)
+                    S33 = A_coef + B_coef * E33 + C_coef * (E33**2)
 
-                # Derivatives for C3333
-                dAdE33 = lam + v1_arr * I1 + 0.5 * g1_arr * (I1**2) + g2_arr * I2_inv + 2.0 * (v2_arr + g2_arr * I1) * E33 + 4.0 * g3_arr * (E33**2)
-                dBdE33 = 2.0 * (v2_arr + g2_arr * I1) + 4.0 * g4_arr * E33
-                dCdE33 = 4.0 * g3_arr
+                    # Derivatives for C3333
+                    dAdE33 = lam + v1_arr * I1 + 0.5 * g1_arr * (I1**2) + g2_arr * I2_inv + 2.0 * (v2_arr + g2_arr * I1) * E33 + 4.0 * g3_arr * (E33**2)
+                    dBdE33 = 2.0 * (v2_arr + g2_arr * I1) + 4.0 * g4_arr * E33
+                    dCdE33 = 4.0 * g3_arr
 
-                C3333 = dAdE33 + dBdE33 * E33 + dCdE33 * (E33**2) + B_coef + 2.0 * C_coef * E33
-                C3333_safe = np.where(np.abs(C3333) < 1e-12, 1e-12, C3333)
+                    C3333 = dAdE33 + dBdE33 * E33 + dCdE33 * (E33**2) + B_coef + 2.0 * C_coef * E33
+                    C3333_safe = np.where(np.abs(C3333) < 1e-12, 1e-12, C3333)
 
-                dE33 = - S33 / C3333_safe
-                E33 = E33 + dE33
-                if np.max(np.abs(dE33)) < 1e-12:
-                    break
+                    dE33 = - S33 / C3333_safe
+                    E33 = E33 + dE33
+                    if np.max(np.abs(dE33)) < 1e-12:
+                        break
 
             F33 = np.sqrt(np.maximum(1e-12, 1.0 + 2.0 * E33))
 
@@ -489,6 +820,56 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
             E_GL = np.zeros((3, 3, nx, ny))
             E_GL[0:2, 0:2] = E_GL_2d
             F33 = np.ones((nx, ny))
+
+        capping_weight = np.zeros((nx, ny))
+        if strain_capping_enabled:
+            # Automatic limit calculation: E_cap = sqrt(0.2 * mu / |g4|)
+            g4_val = g4_arr.mean() if isinstance(g4_arr, np.ndarray) else g4_arr
+            mu_val = mu.mean() if isinstance(mu, np.ndarray) else mu
+            if strain_capping_limit is None or strain_capping_limit <= 0:
+                if g4_val < 0:
+                    E_cap_local = np.sqrt(0.2 * mu_val / np.abs(g4_val))
+                else:
+                    E_cap_local = 999.0
+            else:
+                E_cap_local = strain_capping_limit
+
+            tr_orig = E_GL[0, 0] + E_GL[1, 1] + E_GL[2, 2]
+            E_dev = E_GL.copy()
+            tr_third = tr_orig / 3.0
+            for i in range(3):
+                E_dev[i, i] -= tr_third
+            
+            E_dev_double_dot = np.zeros_like(tr_orig)
+            for i in range(3):
+                for j in range(3):
+                    E_dev_double_dot += E_dev[i, j] * E_dev[j, i]
+            E_eq = np.sqrt(np.maximum(0.0, (2.0 / 3.0) * E_dev_double_dot))
+
+            if strain_capping_type == "smooth":
+                # Smooth capping mapping
+                f = np.ones_like(E_eq)
+                nonzero = E_eq > 1e-12
+                p = strain_capping_smooth_power
+                ratio = E_eq[nonzero] / E_cap_local
+                ratio_p = np.minimum(100.0, ratio**p)
+                f[nonzero] = (E_cap_local / E_eq[nonzero]) * (np.tanh(ratio_p))**(1.0/p)
+                capping_weight = np.tanh(np.minimum(100.0, (E_eq / E_cap_local)**p))**2
+                G_tangent_ratio = strain_capping_tangent_ratio
+            else:
+                # Piecewise (Hard) capping
+                is_capped = E_eq > E_cap_local
+                f = np.ones_like(E_eq)
+                np.divide(E_cap_local, E_eq, out=f, where=is_capped)
+                capping_weight = is_capped.astype(float)
+                G_tangent_ratio = strain_capping_tangent_ratio
+
+            E_GL_capped = E_dev * f[np.newaxis, np.newaxis, :, :]
+            for i in range(3):
+                E_GL_capped[i, i] += tr_third
+
+            E_GL_orig = E_GL
+            E_GL = E_GL_capped
 
         trE = E_GL[0, 0] + E_GL[1, 1] + E_GL[2, 2]
         trE2 = np.einsum('ijxy,jixy->xy', E_GL, E_GL)
@@ -503,39 +884,56 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
              + B_coef[np.newaxis, np.newaxis, :, :] * E_GL \
              + C_coef[np.newaxis, np.newaxis, :, :] * E2
 
+        if strain_capping_enabled:
+            G_tangent = G_tangent_ratio * mu
+            S_3d += 2.0 * G_tangent[np.newaxis, np.newaxis, :, :] * (E_GL_orig - E_GL) * capping_weight[np.newaxis, np.newaxis, :, :]
+
         S = S_3d[0:2, 0:2]
 
-        # Derivatives for C4_3d
-        dAdE = (lam + v1_arr * trE + 0.5 * g1_arr * (trE**2) + g2_arr * trE2)[np.newaxis, np.newaxis, :, :] * I2_3d \
-             + 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :] * E_GL \
-             + 4.0 * g3_arr[np.newaxis, np.newaxis, :, :] * E2
+        C4_eff = None
+        if need_tangent and tangent_method == "mandel":
+            C4_eff = _landau_C4eff_mandel_2d(
+                E_GL, E2, trE, trE2, lam,
+                v1_arr, v2_arr, g1_arr, g2_arr, g3_arr, g4_arr,
+                B_coef, C_coef, plane_mode,
+                strain_capping_enabled=strain_capping_enabled,
+                G_tangent=(G_tangent if strain_capping_enabled else None),
+                capping_weight=(capping_weight if strain_capping_enabled else None))
+        elif need_tangent:
+            # Derivatives for C4_3d
+            dAdE = (lam + v1_arr * trE + 0.5 * g1_arr * (trE**2) + g2_arr * trE2)[np.newaxis, np.newaxis, :, :] * I2_3d \
+                 + 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :] * E_GL \
+                 + 4.0 * g3_arr[np.newaxis, np.newaxis, :, :] * E2
 
-        dBdE = 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :] * I2_3d \
-             + 4.0 * g4_arr[np.newaxis, np.newaxis, :, :] * E_GL
+            dBdE = 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :] * I2_3d \
+                 + 4.0 * g4_arr[np.newaxis, np.newaxis, :, :] * E_GL
 
-        dCdE = 4.0 * g3_arr[np.newaxis, np.newaxis, :, :] * I2_3d
+            dCdE = 4.0 * g3_arr[np.newaxis, np.newaxis, :, :] * I2_3d
 
-        # 4th-order derivative term building
-        term1 = np.einsum('ijxy,klxy->ijklxy', I2_3d, dAdE)
-        term2 = np.einsum('ijxy,klxy->ijklxy', E_GL, dBdE)
-        term3 = np.einsum('ijxy,klxy->ijklxy', E2, dCdE)
-        term4 = B_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * I4s_3d
+            # 4th-order derivative term building
+            term1 = np.einsum('ijxy,klxy->ijklxy', I2_3d, dAdE)
+            term2 = np.einsum('ijxy,klxy->ijklxy', E_GL, dBdE)
+            term3 = np.einsum('ijxy,klxy->ijklxy', E2, dCdE)
+            term4 = B_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * I4s_3d
 
-        term5_part1 = np.einsum('ikxy,jlxy->ijklxy', I2_3d, E_GL) + np.einsum('ikxy,jlxy->ijklxy', E_GL, I2_3d)
-        term5_part2 = np.einsum('ilxy,jkxy->ijklxy', I2_3d, E_GL) + np.einsum('ilxy,jkxy->ijklxy', E_GL, I2_3d)
-        K_E = 0.5 * (term5_part1 + term5_part2)
-        term5 = C_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * K_E
+            term5_part1 = np.einsum('ikxy,jlxy->ijklxy', I2_3d, E_GL) + np.einsum('ikxy,jlxy->ijklxy', E_GL, I2_3d)
+            term5_part2 = np.einsum('ilxy,jkxy->ijklxy', I2_3d, E_GL) + np.einsum('ilxy,jkxy->ijklxy', E_GL, I2_3d)
+            K_E = 0.5 * (term5_part1 + term5_part2)
+            term5 = C_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * K_E
 
-        C4_3d = term1 + term2 + term3 + term4 + term5
+            C4_3d = term1 + term2 + term3 + term4 + term5
 
-        if plane_mode == "plane_stress":
-            C2222 = np.maximum(1e-14, C4_3d[2, 2, 2, 2])
-            C22 = C4_3d[:, :, 2, 2] # (3, 3, nx, ny)
-            C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2] - \
-                     C22[0:2, 0:2, np.newaxis, np.newaxis, :, :] * \
-                     C22[np.newaxis, np.newaxis, 0:2, 0:2, :, :] / C2222[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :]
-        else:
-            C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2]
+            if strain_capping_enabled:
+                C4_3d += (2.0 * G_tangent)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * K_dev_3d * capping_weight[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :]
+
+            if plane_mode == "plane_stress":
+                C2222 = np.maximum(1e-14, C4_3d[2, 2, 2, 2])
+                C22 = C4_3d[:, :, 2, 2] # (3, 3, nx, ny)
+                C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2] - \
+                         C22[0:2, 0:2, np.newaxis, np.newaxis, :, :] * \
+                         C22[np.newaxis, np.newaxis, 0:2, 0:2, :, :] / C2222[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :]
+            else:
+                C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2]
     elif model_type == "murnaghan":
         nx, ny = Fe.shape[2], Fe.shape[3]
         A_arr = np.full((nx, ny), float(A_m)) if isinstance(A_m, (int, float, np.number)) else np.array(A_m)
@@ -593,44 +991,46 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
              + C_arr[np.newaxis, np.newaxis, :, :] * E2
              
         S = S_3d[0:2, 0:2]
-        
-        # Build 3D identity tensors broadcast to (nx, ny)
-        ones_grid = np.ones((nx, ny))
-        i3 = np.eye(3)
-        I2_3d = np.einsum('ij,xy->ijxy', i3, ones_grid)
-        II_3d = np.einsum('ij,kl,xy->ijklxy', i3, i3, ones_grid)
-        
-        # 4th-order symmetric identity in 3D
-        I4s_3d = np.zeros((3, 3, 3, 3, nx, ny))
-        for i in range(3):
-            for j in range(3):
-                for k in range(3):
-                    for l in range(3):
-                        I4s_3d[i, j, k, l] = 0.5 * (i3[i, k] * i3[j, l] + i3[i, l] * i3[j, k])
-                        
-        term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * II_3d
-        
-        I_dyad_E = np.einsum('ijxy,klxy->ijklxy', I2_3d, E_GL)
-        E_dyad_I = np.einsum('ijxy,klxy->ijklxy', E_GL, I2_3d)
-        term2 = (2.0 * B_arr)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (I_dyad_E + E_dyad_I)
-        
-        term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * I4s_3d
-        
-        term4_part1 = np.einsum('ikxy,jlxy->ijklxy', I2_3d, E_GL) + np.einsum('ikxy,jlxy->ijklxy', E_GL, I2_3d)
-        term4_part2 = np.einsum('ilxy,jkxy->ijklxy', I2_3d, E_GL) + np.einsum('ilxy,jkxy->ijklxy', E_GL, I2_3d)
-        K_E = 0.5 * (term4_part1 + term4_part2)
-        term4 = C_arr[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * K_E
-        
-        C4_3d = term1 + term2 + term3 + term4
-        
-        if plane_mode == "plane_stress":
-            C2222 = np.maximum(1e-14, C4_3d[2, 2, 2, 2])
-            C22 = C4_3d[:, :, 2, 2] # (3, 3, nx, ny)
-            C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2] - \
-                     C22[0:2, 0:2, np.newaxis, np.newaxis, :, :] * \
-                     C22[np.newaxis, np.newaxis, 0:2, 0:2, :, :] / C2222[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :]
-        else:
-            C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2]
+
+        C4_eff = None
+        if need_tangent:
+            # Build 3D identity tensors broadcast to (nx, ny)
+            ones_grid = np.ones((nx, ny))
+            i3 = np.eye(3)
+            I2_3d = np.einsum('ij,xy->ijxy', i3, ones_grid)
+            II_3d = np.einsum('ij,kl,xy->ijklxy', i3, i3, ones_grid)
+
+            # 4th-order symmetric identity in 3D
+            I4s_3d = np.zeros((3, 3, 3, 3, nx, ny))
+            for i in range(3):
+                for j in range(3):
+                    for k in range(3):
+                        for l in range(3):
+                            I4s_3d[i, j, k, l] = 0.5 * (i3[i, k] * i3[j, l] + i3[i, l] * i3[j, k])
+
+            term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * II_3d
+
+            I_dyad_E = np.einsum('ijxy,klxy->ijklxy', I2_3d, E_GL)
+            E_dyad_I = np.einsum('ijxy,klxy->ijklxy', E_GL, I2_3d)
+            term2 = (2.0 * B_arr)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * (I_dyad_E + E_dyad_I)
+
+            term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * I4s_3d
+
+            term4_part1 = np.einsum('ikxy,jlxy->ijklxy', I2_3d, E_GL) + np.einsum('ikxy,jlxy->ijklxy', E_GL, I2_3d)
+            term4_part2 = np.einsum('ilxy,jkxy->ijklxy', I2_3d, E_GL) + np.einsum('ilxy,jkxy->ijklxy', E_GL, I2_3d)
+            K_E = 0.5 * (term4_part1 + term4_part2)
+            term4 = C_arr[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :] * K_E
+
+            C4_3d = term1 + term2 + term3 + term4
+
+            if plane_mode == "plane_stress":
+                C2222 = np.maximum(1e-14, C4_3d[2, 2, 2, 2])
+                C22 = C4_3d[:, :, 2, 2] # (3, 3, nx, ny)
+                C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2] - \
+                         C22[0:2, 0:2, np.newaxis, np.newaxis, :, :] * \
+                         C22[np.newaxis, np.newaxis, 0:2, 0:2, :, :] / C2222[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :]
+            else:
+                C4_eff = C4_3d[0:2, 0:2, 0:2, 0:2]
     else:
         # Default: St. Venant-Kirchhoff (SVK)
         E_GL = 0.5 * (np.einsum('jixy,jkxy->ikxy', Fe, Fe, optimize=True) - I2)
@@ -647,27 +1047,42 @@ def constitutive_hyperelastic_2d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
 
     if Fp is not None:
         P = np.einsum('ikxy,klxy,jlxy->ijxy', Fe, S, Fp_inv, optimize=True)
-        S_ref = np.einsum('mkxy,klxy,jlxy->mjxy', Fp_inv, S, Fp_inv, optimize=True)
-        
-        A = np.einsum('klmnxy,jlxy->kjmnxy', C4_eff, Fp_inv, optimize=True)
-        B = np.einsum('kjmnxy,bmxy->kjbnxy', A, Fp_inv, optimize=True)
-        C = np.einsum('kjbnxy,ikxy->ijbnxy', B, Fe, optimize=True)
-        term2 = np.einsum('ijbnxy,anxy->ijabxy', C, Fe, optimize=True)
-        
-        term1 = np.einsum('bjxy,ia->ijabxy', S_ref, np.eye(ndim), optimize=True)
-        K4 = term1 + term2
+        if need_tangent:
+            S_ref = np.einsum('mkxy,klxy,jlxy->mjxy', Fp_inv, S, Fp_inv, optimize=True)
+
+            A = np.einsum('klmnxy,jlxy->kjmnxy', C4_eff, Fp_inv, optimize=True)
+            B = np.einsum('kjmnxy,bmxy->kjbnxy', A, Fp_inv, optimize=True)
+            C = np.einsum('kjbnxy,ikxy->ijbnxy', B, Fe, optimize=True)
+            term2 = np.einsum('ijbnxy,anxy->ijabxy', C, Fe, optimize=True)
+
+            term1 = np.einsum('bjxy,ia->ijabxy', S_ref, np.eye(ndim), optimize=True)
+            K4 = term1 + term2
+        else:
+            K4 = None
     else:
         P = np.einsum('ijxy,jkxy->ikxy', Fe, S, optimize=True)
-        
-        term1 = np.einsum('ijxy,jkmnxy->ikmnxy', S, I4, optimize=True)
-        
-        FC4 = np.einsum('ijxy,jkmnxy->ikmnxy', Fe, C4_eff, optimize=True)
-        Ft = np.einsum('ijxy->jixy', Fe)
-        FC4Ft = np.einsum('ijklxy,lmxy->ijkmxy', FC4, Ft, optimize=True)
-        term2_part1 = np.einsum('ijklxy,lkmnxy->ijmnxy', I4rt, FC4Ft, optimize=True)
-        term2 = np.einsum('ijklxy,lkmnxy->ijmnxy', term2_part1, I4rt, optimize=True)
-        
-        K4 = term1 + term2
+        if need_tangent and tangent_method == "mandel":
+            # The I4/I4rt contractions of the reference path are δ-tensor
+            # identities: term1_ikmn = S_in δ_km, and each I4rt sandwich is a
+            # pure index permutation — applied here as transposes.
+            FC4 = np.einsum('ijxy,jkmnxy->ikmnxy', Fe, C4_eff, optimize=True)
+            Ft = np.einsum('ijxy->jixy', Fe)
+            FC4Ft = np.einsum('ijklxy,lmxy->ijkmxy', FC4, Ft, optimize=True)
+            K4 = np.ascontiguousarray(FC4Ft.transpose(1, 0, 3, 2, 4, 5))
+            for k in range(ndim):
+                K4[:, k, k] += S
+        elif need_tangent:
+            term1 = np.einsum('ijxy,jkmnxy->ikmnxy', S, I4, optimize=True)
+
+            FC4 = np.einsum('ijxy,jkmnxy->ikmnxy', Fe, C4_eff, optimize=True)
+            Ft = np.einsum('ijxy->jixy', Fe)
+            FC4Ft = np.einsum('ijklxy,lmxy->ijkmxy', FC4, Ft, optimize=True)
+            term2_part1 = np.einsum('ijklxy,lkmnxy->ijmnxy', I4rt, FC4Ft, optimize=True)
+            term2 = np.einsum('ijklxy,lkmnxy->ijmnxy', term2_part1, I4rt, optimize=True)
+
+            K4 = term1 + term2
+        else:
+            K4 = None
 
     return P, K4, F33
 
@@ -967,7 +1382,12 @@ def _dbfft_step_2d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
                    tol=1e-5, tol_CG=1e-6, max_iter=20,
                    model_type="svk", plane_mode="plane_strain",
                    A_m=0.0, B_m=0.0, C_m=0.0,
-                   v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                   v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                   strain_capping_enabled=False,
+                   strain_capping_limit=None,
+                   strain_capping_tangent_ratio=0.1,
+                   strain_capping_type="piecewise",
+                   strain_capping_smooth_power=1.0):
     nx, ny = F.shape[2], F.shape[3]
     F_bar_grid = np.einsum('ij,xy->ijxy', F_bar, np.ones((nx, ny)))
     u = _reconstruct_u_from_F_2d(F, F_bar, Xi)
@@ -983,26 +1403,54 @@ def _dbfft_step_2d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
     else:
         Fp_inv = None
         
+    # P carried over from the accepted line-search trial of the previous
+    # iteration (same u, so identical): saves re-evaluating the constitutive
+    # law at the top of the iteration; the tangent is built only when the
+    # residual check says another Newton step is actually needed.
+    P_carry   = None
+    F33_carry = None
     for i_NW in range(max_iter):
         grad_u = get_grad_u_2d(u, Xi)
         F_curr = F_bar_grid + grad_u
-        
-        P, K4, F33 = constitutive_hyperelastic_2d(
-            F_curr, C4, I2, I4, I4rt, Fp=Fp,
-            model_type=model_type, plane_mode=plane_mode,
-            A_m=A_m, B_m=B_m, C_m=C_m,
-            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
-            
+
+        if P_carry is not None:
+            P, K4, F33 = P_carry, None, F33_carry
+            P_carry = None
+        else:
+            P, K4, F33 = constitutive_hyperelastic_2d(
+                F_curr, C4, I2, I4, I4rt, Fp=Fp,
+                model_type=model_type, plane_mode=plane_mode,
+                A_m=A_m, B_m=B_m, C_m=C_m,
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
+
         P_hat = _fft2_tensor(P)
         b_hat = -1j * np.einsum('jxy,ijxy->ixy', Xi, P_hat)
-        
+
         res_norm = np.linalg.norm(b_hat)
         P_norm = np.linalg.norm(P)
         rel_res = res_norm / (P_norm + 1e-20)
-        
+
         if rel_res < tol and i_NW > 0:
+            # K4 may be None here — no caller consumes the returned tangent.
             return F_curr, P, K4, F33, i_NW + 1
-            
+
+        if K4 is None:
+            P, K4, F33 = constitutive_hyperelastic_2d(
+                F_curr, C4, I2, I4, I4rt, Fp=Fp,
+                model_type=model_type, plane_mode=plane_mode,
+                A_m=A_m, B_m=B_m, C_m=C_m,
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
+
         K_avg = K4.mean(axis=(-2, -1))
         A_mat = np.einsum('jxy,ijlk,lxy->ikxy', Xi, K_avg, Xi)
         M_inv = _invert_matrix_field_2d(A_mat)
@@ -1027,21 +1475,32 @@ def _dbfft_step_2d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
                 alpha *= 0.5
                 continue
             try:
-                P_t, K4_t, F33_t = constitutive_hyperelastic_2d(
+                # Stress-only trial: the tangent of a rejected trial is never
+                # used, and the accepted trial's tangent is built lazily at
+                # the top of the next iteration (only if it iterates again).
+                P_t, _, F33_t = constitutive_hyperelastic_2d(
                     F_trial, C4, I2, I4, I4rt, Fp=Fp,
                     model_type=model_type, plane_mode=plane_mode,
-                    A_m=A_m, B_m=B_m, C_m=C_m)
-                if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
+                    A_m=A_m, B_m=B_m, C_m=C_m,
+                    v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                    strain_capping_enabled=strain_capping_enabled,
+                    strain_capping_limit=strain_capping_limit,
+                    strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                    strain_capping_type=strain_capping_type,
+                    strain_capping_smooth_power=strain_capping_smooth_power,
+                    need_tangent=False)
+                if np.any(np.isnan(P_t)):
                     alpha *= 0.5
                     continue
                 u = u_trial
+                P_carry, F33_carry = P_t, F33_t
                 converged_constitutive = True
                 break
             except Exception:
                 alpha *= 0.5
         if not converged_constitutive:
             raise ValueError("Constitutive solver failed to converge in line search (potential negative Jacobian/NaN).")
-            
+
     # Newton loop finished without returning -> did not converge
     raise ValueError(f"DBFFT solver did not converge within {max_iter} iterations. Final relative residual: {rel_res:.2e}")
 
@@ -1049,7 +1508,12 @@ def _dbfft_step_2d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
 def _dbfft_step_3d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
                    tol=1e-5, tol_CG=1e-6, max_iter=20,
                    model_type="svk", A_m=0.0, B_m=0.0, C_m=0.0,
-                   v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                   v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                   strain_capping_enabled=False,
+                   strain_capping_limit=None,
+                   strain_capping_tangent_ratio=0.1,
+                   strain_capping_type="piecewise",
+                   strain_capping_smooth_power=1.0):
     nx, ny, nz = F.shape[2], F.shape[3], F.shape[4]
     F_bar_grid = np.einsum('ij,xyz->ijxyz', F_bar, np.ones((nx, ny, nz)))
     u = _reconstruct_u_from_F_3d(F, F_bar, Xi)
@@ -1059,25 +1523,49 @@ def _dbfft_step_3d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
     else:
         Fp_inv = None
         
+    # See _dbfft_step_2d: P carried from the accepted line-search trial,
+    # tangent built lazily only when another Newton step is needed.
+    P_carry = None
     for i_NW in range(max_iter):
         grad_u = get_grad_u_3d(u, Xi)
         F_curr = F_bar_grid + grad_u
-        
-        P, K4 = constitutive_hyperelastic_3d(
-            F_curr, C4, I2, I4, I4rt, Fp=Fp,
-            model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
-            
+
+        if P_carry is not None:
+            P, K4 = P_carry, None
+            P_carry = None
+        else:
+            P, K4 = constitutive_hyperelastic_3d(
+                F_curr, C4, I2, I4, I4rt, Fp=Fp,
+                model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
+
         P_hat = _fft3_tensor(P)
         b_hat = -1j * np.einsum('jxyz,ijxyz->ixyz', Xi, P_hat)
-        
+
         res_norm = np.linalg.norm(b_hat)
         P_norm = np.linalg.norm(P)
         rel_res = res_norm / (P_norm + 1e-20)
-        
+
         if rel_res < tol and i_NW > 0:
+            # K4 may be None here — no caller consumes the returned tangent.
             return F_curr, P, K4, i_NW + 1
-            
+
+        if K4 is None:
+            P, K4 = constitutive_hyperelastic_3d(
+                F_curr, C4, I2, I4, I4rt, Fp=Fp,
+                model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
+
         K_avg = K4.mean(axis=(-3, -2, -1))
         A_mat = np.einsum('jxyz,ijlk,lxyz->ikxyz', Xi, K_avg, Xi)
         M_inv = _invert_matrix_field_3d(A_mat)
@@ -1106,14 +1594,21 @@ def _dbfft_step_3d(F, F_bar, Xi, C4, I2, I4, I4rt, Fp=None,
                 alpha *= 0.5
                 continue
             try:
-                P_t, K4_t = constitutive_hyperelastic_3d(
+                P_t, _ = constitutive_hyperelastic_3d(
                     F_trial, C4, I2, I4, I4rt, Fp=Fp,
                     model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-                    v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
-                if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
+                    v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                    strain_capping_enabled=strain_capping_enabled,
+                    strain_capping_limit=strain_capping_limit,
+                    strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                    strain_capping_type=strain_capping_type,
+                    strain_capping_smooth_power=strain_capping_smooth_power,
+                    need_tangent=False)
+                if np.any(np.isnan(P_t)):
                     alpha *= 0.5
                     continue
                 u = u_trial
+                P_carry = P_t
                 converged_constitutive = True
                 break
             except Exception:
@@ -1150,11 +1645,26 @@ def build_C4_3d(E_field, nu_field, I4s, II):
 # ---------------------------------------------------------------------------
 
 def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk", A_m=0.0, B_m=0.0, C_m=0.0,
-                                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                                 strain_capping_enabled=False,
+                                 strain_capping_limit=None,
+                                 strain_capping_tangent_ratio=0.1,
+                                 strain_capping_type="piecewise",
+                                 strain_capping_smooth_power=1.0,
+                                 need_tangent=True,
+                                 tangent_method="mandel"):
     """
     Compute 1st Piola-Kirchhoff stress P and consistent tangent K4 in 3D,
     supporting an optional plastic deformation gradient field Fp.
     Supports 'svk', 'neo_hookean', and 'landau' models.
+
+    With need_tangent=False the material-tangent assembly and its geometric
+    push-forward are skipped and K4 is returned as None (stress-only path).
+
+    tangent_method="mandel" (default) assembles the landau material tangent
+    in Mandel notation and applies the geometric push-forward with direct
+    index permutations; "reference" keeps the original einsum-dyad assembly
+    as a validation oracle.
     """
     ndim = 3
 
@@ -1185,6 +1695,56 @@ def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
         Ce = np.einsum('jixyz,jkxyz->ikxyz', Fe, Fe, optimize=True)
         E_GL = 0.5 * (Ce - I2)
 
+        capping_weight = np.zeros((nx, ny, nz))
+        if strain_capping_enabled:
+            # Automatic limit calculation: E_cap = sqrt(0.2 * mu / |g4|)
+            g4_val = g4_arr.mean() if isinstance(g4_arr, np.ndarray) else g4_arr
+            mu_val = mu.mean() if isinstance(mu, np.ndarray) else mu
+            if strain_capping_limit is None or strain_capping_limit <= 0:
+                if g4_val < 0:
+                    E_cap_local = np.sqrt(0.2 * mu_val / np.abs(g4_val))
+                else:
+                    E_cap_local = 999.0
+            else:
+                E_cap_local = strain_capping_limit
+
+            tr_orig = E_GL[0, 0] + E_GL[1, 1] + E_GL[2, 2]
+            E_dev = E_GL.copy()
+            tr_third = tr_orig / 3.0
+            for i in range(3):
+                E_dev[i, i] -= tr_third
+            
+            E_dev_double_dot = np.zeros_like(tr_orig)
+            for i in range(3):
+                for j in range(3):
+                    E_dev_double_dot += E_dev[i, j] * E_dev[j, i]
+            E_eq = np.sqrt(np.maximum(0.0, (2.0 / 3.0) * E_dev_double_dot))
+
+            if strain_capping_type == "smooth":
+                # Smooth capping mapping
+                f = np.ones_like(E_eq)
+                nonzero = E_eq > 1e-12
+                p = strain_capping_smooth_power
+                ratio = E_eq[nonzero] / E_cap_local
+                ratio_p = np.minimum(100.0, ratio**p)
+                f[nonzero] = (E_cap_local / E_eq[nonzero]) * (np.tanh(ratio_p))**(1.0/p)
+                capping_weight = np.tanh(np.minimum(100.0, (E_eq / E_cap_local)**p))**2
+                G_tangent_ratio = strain_capping_tangent_ratio
+            else:
+                # Piecewise (Hard) capping
+                is_capped = E_eq > E_cap_local
+                f = np.ones_like(E_eq)
+                np.divide(E_cap_local, E_eq, out=f, where=is_capped)
+                capping_weight = is_capped.astype(float)
+                G_tangent_ratio = strain_capping_tangent_ratio
+
+            E_GL_capped = E_dev * f[np.newaxis, np.newaxis, :, :, :]
+            for i in range(3):
+                E_GL_capped[i, i] += tr_third
+
+            E_GL_orig = E_GL
+            E_GL = E_GL_capped
+
         trE = E_GL[0, 0] + E_GL[1, 1] + E_GL[2, 2]
         trE2 = np.einsum('ijxyz,jixyz->xyz', E_GL, E_GL)
         trE3 = np.einsum('ijxyz,jkxyz,kixyz->xyz', E_GL, E_GL, E_GL)
@@ -1198,30 +1758,48 @@ def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
           + B_coef[np.newaxis, np.newaxis, :, :, :] * E_GL \
           + C_coef[np.newaxis, np.newaxis, :, :, :] * E2
 
-        # Derivatives for C4_eff
-        dAdE = (lam + v1_arr * trE + 0.5 * g1_arr * (trE**2) + g2_arr * trE2)[np.newaxis, np.newaxis, :, :, :] * I2 \
-             + 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :, :] * E_GL \
-             + 4.0 * g3_arr[np.newaxis, np.newaxis, :, :, :] * E2
+        if strain_capping_enabled:
+            G_tangent = G_tangent_ratio * mu
+            S += 2.0 * G_tangent[np.newaxis, np.newaxis, :, :, :] * (E_GL_orig - E_GL) * capping_weight[np.newaxis, np.newaxis, :, :, :]
 
-        dBdE = 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :, :] * I2 \
-             + 4.0 * g4_arr[np.newaxis, np.newaxis, :, :, :] * E_GL
+        C4_eff = None
+        if need_tangent and tangent_method == "mandel":
+            C4_eff = _landau_C4eff_mandel_3d(
+                E_GL, E2, trE, trE2, lam,
+                v1_arr, v2_arr, g1_arr, g2_arr, g3_arr, g4_arr,
+                B_coef, C_coef,
+                strain_capping_enabled=strain_capping_enabled,
+                G_tangent=(G_tangent if strain_capping_enabled else None),
+                capping_weight=(capping_weight if strain_capping_enabled else None))
+        elif need_tangent:
+            # Derivatives for C4_eff
+            dAdE = (lam + v1_arr * trE + 0.5 * g1_arr * (trE**2) + g2_arr * trE2)[np.newaxis, np.newaxis, :, :, :] * I2 \
+                 + 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :, :] * E_GL \
+                 + 4.0 * g3_arr[np.newaxis, np.newaxis, :, :, :] * E2
 
-        dCdE = 4.0 * g3_arr[np.newaxis, np.newaxis, :, :, :] * I2
+            dBdE = 2.0 * (v2_arr + g2_arr * trE)[np.newaxis, np.newaxis, :, :, :] * I2 \
+                 + 4.0 * g4_arr[np.newaxis, np.newaxis, :, :, :] * E_GL
 
-        I4s = 0.5 * (I4 + I4rt)
-        II = _dyad22_3d(I2, I2)
+            dCdE = 4.0 * g3_arr[np.newaxis, np.newaxis, :, :, :] * I2
 
-        term1 = np.einsum('ijxyz,klxyz->ijklxyz', I2, dAdE)
-        term2 = np.einsum('ijxyz,klxyz->ijklxyz', E_GL, dBdE)
-        term3 = np.einsum('ijxyz,klxyz->ijklxyz', E2, dCdE)
-        term4 = B_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * I4s
+            I4s = 0.5 * (I4 + I4rt)
+            II = _dyad22_3d(I2, I2)
 
-        term5_part1 = np.einsum('ikxyz,jlxyz->ijklxyz', I2, E_GL) + np.einsum('ikxyz,jlxyz->ijklxyz', E_GL, I2)
-        term5_part2 = np.einsum('ilxyz,jkxyz->ijklxyz', I2, E_GL) + np.einsum('ilxyz,jkxyz->ijklxyz', E_GL, I2)
-        K_E = 0.5 * (term5_part1 + term5_part2)
-        term5 = C_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * K_E
+            term1 = np.einsum('ijxyz,klxyz->ijklxyz', I2, dAdE)
+            term2 = np.einsum('ijxyz,klxyz->ijklxyz', E_GL, dBdE)
+            term3 = np.einsum('ijxyz,klxyz->ijklxyz', E2, dCdE)
+            term4 = B_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * I4s
 
-        C4_eff = term1 + term2 + term3 + term4 + term5
+            term5_part1 = np.einsum('ikxyz,jlxyz->ijklxyz', I2, E_GL) + np.einsum('ikxyz,jlxyz->ijklxyz', E_GL, I2)
+            term5_part2 = np.einsum('ilxyz,jkxyz->ijklxyz', I2, E_GL) + np.einsum('ilxyz,jkxyz->ijklxyz', E_GL, I2)
+            K_E = 0.5 * (term5_part1 + term5_part2)
+            term5 = C_coef[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * K_E
+
+            C4_eff = term1 + term2 + term3 + term4 + term5
+
+            if strain_capping_enabled:
+                K_dev = I4s - (1.0 / 3.0) * II
+                C4_eff += (2.0 * G_tangent)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * K_dev * capping_weight[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :]
     elif model_type == "murnaghan":
         nx, ny, nz = Fe.shape[2], Fe.shape[3], Fe.shape[4]
         A_arr = np.full((nx, ny, nz), float(A_m)) if isinstance(A_m, (int, float, np.number)) else np.array(A_m)
@@ -1242,24 +1820,26 @@ def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
           + 2.0 * (mu + B_arr * trE)[np.newaxis, np.newaxis, :, :, :] * E_GL \
           + C_arr[np.newaxis, np.newaxis, :, :, :] * E2
 
-        # Tangent stiffness C4_eff
-        I4s = 0.5 * (I4 + I4rt)
-        II = _dyad22_3d(I2, I2)
-        
-        term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * II
+        C4_eff = None
+        if need_tangent:
+            # Tangent stiffness C4_eff
+            I4s = 0.5 * (I4 + I4rt)
+            II = _dyad22_3d(I2, I2)
 
-        I_dyad_E = np.einsum('ijxyz,klxyz->ijklxyz', I2, E_GL)
-        E_dyad_I = np.einsum('ijxyz,klxyz->ijklxyz', E_GL, I2)
-        term2 = (2.0 * B_arr)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * (I_dyad_E + E_dyad_I)
+            term1 = (lam + 2.0 * A_arr * trE)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * II
 
-        term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * I4s
+            I_dyad_E = np.einsum('ijxyz,klxyz->ijklxyz', I2, E_GL)
+            E_dyad_I = np.einsum('ijxyz,klxyz->ijklxyz', E_GL, I2)
+            term2 = (2.0 * B_arr)[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * (I_dyad_E + E_dyad_I)
 
-        term4_part1 = np.einsum('ikxyz,jlxyz->ijklxyz', I2, E_GL) + np.einsum('ikxyz,jlxyz->ijklxyz', E_GL, I2)
-        term4_part2 = np.einsum('ilxyz,jkxyz->ijklxyz', I2, E_GL) + np.einsum('ilxyz,jkxyz->ijklxyz', E_GL, I2)
-        K_E = 0.5 * (term4_part1 + term4_part2)
-        term4 = C_arr[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * K_E
+            term3 = (2.0 * (mu + B_arr * trE))[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * I4s
 
-        C4_eff = term1 + term2 + term3 + term4
+            term4_part1 = np.einsum('ikxyz,jlxyz->ijklxyz', I2, E_GL) + np.einsum('ikxyz,jlxyz->ijklxyz', E_GL, I2)
+            term4_part2 = np.einsum('ilxyz,jkxyz->ijklxyz', I2, E_GL) + np.einsum('ilxyz,jkxyz->ijklxyz', E_GL, I2)
+            K_E = 0.5 * (term4_part1 + term4_part2)
+            term4 = C_arr[np.newaxis, np.newaxis, np.newaxis, np.newaxis, :, :, :] * K_E
+
+            C4_eff = term1 + term2 + term3 + term4
     else:
         E_GL = 0.5 * (np.einsum('jixyz,jkxyz->ikxyz', Fe, Fe, optimize=True) - I2)
         S    = np.einsum('ijklxyz,lkxyz->ijxyz', C4, E_GL, optimize=True)
@@ -1267,27 +1847,40 @@ def constitutive_hyperelastic_3d(F, C4, I2, I4, I4rt, Fp=None, model_type="svk",
 
     if Fp is not None:
         P = np.einsum('ikxyz,klxyz,jlxyz->ijxyz', Fe, S, Fp_inv, optimize=True)
-        S_ref = np.einsum('mkxyz,klxyz,jlxyz->mjxyz', Fp_inv, S, Fp_inv, optimize=True)
-        
-        A = np.einsum('klmnxyz,jlxyz->kjmnxyz', C4_eff, Fp_inv, optimize=True)
-        B = np.einsum('kjmnxyz,bmxyz->kjbnxyz', A, Fp_inv, optimize=True)
-        C = np.einsum('kjbnxyz,ikxyz->ijbnxyz', B, Fe, optimize=True)
-        term2 = np.einsum('ijbnxyz,anxyz->ijabxyz', C, Fe, optimize=True)
-        
-        term1 = np.einsum('bjxyz,ia->ijabxyz', S_ref, np.eye(ndim), optimize=True)
-        K4 = term1 + term2
+        if need_tangent:
+            S_ref = np.einsum('mkxyz,klxyz,jlxyz->mjxyz', Fp_inv, S, Fp_inv, optimize=True)
+
+            A = np.einsum('klmnxyz,jlxyz->kjmnxyz', C4_eff, Fp_inv, optimize=True)
+            B = np.einsum('kjmnxyz,bmxyz->kjbnxyz', A, Fp_inv, optimize=True)
+            C = np.einsum('kjbnxyz,ikxyz->ijbnxyz', B, Fe, optimize=True)
+            term2 = np.einsum('ijbnxyz,anxyz->ijabxyz', C, Fe, optimize=True)
+
+            term1 = np.einsum('bjxyz,ia->ijabxyz', S_ref, np.eye(ndim), optimize=True)
+            K4 = term1 + term2
+        else:
+            K4 = None
     else:
         P = np.einsum('ijxyz,jkxyz->ikxyz', Fe, S, optimize=True)
-        
-        term1 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', S, I4, optimize=True)
-        
-        FC4 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', Fe, C4_eff, optimize=True)
-        Ft = np.einsum('ijxyz->jixyz', Fe)
-        FC4Ft = np.einsum('ijklxyz,lmxyz->ijkmxyz', FC4, Ft, optimize=True)
-        term2_part1 = np.einsum('ijklxyz,lkmnxyz->ijmnxyz', I4rt, FC4Ft, optimize=True)
-        term2 = np.einsum('ijklxyz,lkmnxyz->ijmnxyz', term2_part1, I4rt, optimize=True)
-        
-        K4 = term1 + term2
+        if need_tangent and tangent_method == "mandel":
+            # δ-tensor identities applied as permutations (see 2D version)
+            FC4 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', Fe, C4_eff, optimize=True)
+            Ft = np.einsum('ijxyz->jixyz', Fe)
+            FC4Ft = np.einsum('ijklxyz,lmxyz->ijkmxyz', FC4, Ft, optimize=True)
+            K4 = np.ascontiguousarray(FC4Ft.transpose(1, 0, 3, 2, 4, 5, 6))
+            for k in range(ndim):
+                K4[:, k, k] += S
+        elif need_tangent:
+            term1 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', S, I4, optimize=True)
+
+            FC4 = np.einsum('ijxyz,jkmnxyz->ikmnxyz', Fe, C4_eff, optimize=True)
+            Ft = np.einsum('ijxyz->jixyz', Fe)
+            FC4Ft = np.einsum('ijklxyz,lmxyz->ijkmxyz', FC4, Ft, optimize=True)
+            term2_part1 = np.einsum('ijklxyz,lkmnxyz->ijmnxyz', I4rt, FC4Ft, optimize=True)
+            term2 = np.einsum('ijklxyz,lkmnxyz->ijmnxyz', term2_part1, I4rt, optimize=True)
+
+            K4 = term1 + term2
+        else:
+            K4 = None
 
     return P, K4
 
@@ -1415,7 +2008,12 @@ def _al_step_2d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
                 tol=1e-5, max_iter=200,
                 model_type="svk", plane_mode="plane_strain",
                 A_m=0.0, B_m=0.0, C_m=0.0,
-                v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                strain_capping_enabled=False,
+                strain_capping_limit=None,
+                strain_capping_tangent_ratio=0.1,
+                strain_capping_type="piecewise",
+                strain_capping_smooth_power=1.0):
     """
     Augmented Lagrangian solver for a single 2D load step.
 
@@ -1461,12 +2059,20 @@ def _al_step_2d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
     DbarF = F_bar - F.mean(axis=(2, 3))
     F = F + np.einsum('ij,xy->ijxy', DbarF, np.ones((nx, ny)))
 
-    # Initial constitutive evaluation
-    P, K4, F33 = constitutive_hyperelastic_2d(
+    # Initial constitutive evaluation (stress-only: the AL fixed-point
+    # iteration never uses the consistent tangent, so K4 is not built and
+    # this solver returns None in its place — no caller consumes it).
+    P, _, F33 = constitutive_hyperelastic_2d(
         F, C4, I2, I4, I4rt, Fp=Fp,
         model_type=model_type, plane_mode=plane_mode,
         A_m=A_m, B_m=B_m, C_m=C_m,
-        v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+        v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+        strain_capping_enabled=strain_capping_enabled,
+        strain_capping_limit=strain_capping_limit,
+        strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+        strain_capping_type=strain_capping_type,
+        strain_capping_smooth_power=strain_capping_smooth_power,
+        need_tangent=False)
 
     # Initialise auxiliary stress
     lam = P.copy()
@@ -1495,19 +2101,25 @@ def _al_step_2d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
             Je_try = Fe_try[0,0]*Fe_try[1,1] - Fe_try[0,1]*Fe_try[1,0]
             
             try:
-                P_new, K4_new, F33_new = constitutive_hyperelastic_2d(
+                P_new, _, F33_new = constitutive_hyperelastic_2d(
                     F_try, C4, I2, I4, I4rt, Fp=Fp,
                     model_type=model_type, plane_mode=plane_mode,
                     A_m=A_m, B_m=B_m, C_m=C_m,
-                    v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
-                if not np.any(np.isnan(P_new)) and not np.any(np.isnan(K4_new)) and np.all(Je_try > 1e-4):
+                    v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                    strain_capping_enabled=strain_capping_enabled,
+                    strain_capping_limit=strain_capping_limit,
+                    strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                    strain_capping_type=strain_capping_type,
+                    strain_capping_smooth_power=strain_capping_smooth_power,
+                    need_tangent=False)
+                if not np.any(np.isnan(P_new)) and np.all(Je_try > 1e-4):
                     F = F_try
-                    P, K4, F33 = P_new, K4_new, F33_new
+                    P, F33 = P_new, F33_new
                     success_step = True
                     break
             except Exception:
                 pass
-        
+
         if not success_step:
             break
 
@@ -1518,7 +2130,7 @@ def _al_step_2d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
         GP = G_op(P)
         res = np.linalg.norm(GP) / (np.sqrt(GP.size) * (np.mean(np.abs(P)) + 1e-20))
         if res < tol and i > 0:
-            return F, P, K4, F33, i + 1
+            return F, P, None, F33, i + 1
 
     # If the loop finishes without returning, it means it didn't converge or broke
     GP = G_op(P)
@@ -1533,7 +2145,12 @@ def _al_step_2d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
 def _al_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
                 tol=1e-5, max_iter=200,
                 model_type="svk", A_m=0.0, B_m=0.0, C_m=0.0,
-                v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                strain_capping_enabled=False,
+                strain_capping_limit=None,
+                strain_capping_tangent_ratio=0.1,
+                strain_capping_type="piecewise",
+                strain_capping_smooth_power=1.0):
     """
     Augmented Lagrangian solver for a single 3D load step.
     Same algorithm as _al_step_2d but for 3D fields.
@@ -1553,10 +2170,18 @@ def _al_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
     DbarF = F_bar - F.mean(axis=(2, 3, 4))
     F = F + np.einsum('ij,xyz->ijxyz', DbarF, np.ones((nx, ny, nz)))
 
-    P, K4 = constitutive_hyperelastic_3d(
+    # Stress-only evaluations throughout: the AL iteration never uses the
+    # consistent tangent (K4 is returned as None — no caller consumes it).
+    P, _ = constitutive_hyperelastic_3d(
         F, C4, I2, I4, I4rt, Fp=Fp,
         model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-        v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+        v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+        strain_capping_enabled=strain_capping_enabled,
+        strain_capping_limit=strain_capping_limit,
+        strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+        strain_capping_type=strain_capping_type,
+        strain_capping_smooth_power=strain_capping_smooth_power,
+        need_tangent=False)
 
     lam = P.copy()
 
@@ -1584,18 +2209,24 @@ def _al_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
             )
             
             try:
-                P_new, K4_new = constitutive_hyperelastic_3d(
+                P_new, _ = constitutive_hyperelastic_3d(
                     F_try, C4, I2, I4, I4rt, Fp=Fp,
                     model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-                    v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
-                if not np.any(np.isnan(P_new)) and not np.any(np.isnan(K4_new)) and np.all(Je_try > 1e-4):
+                    v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                    strain_capping_enabled=strain_capping_enabled,
+                    strain_capping_limit=strain_capping_limit,
+                    strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                    strain_capping_type=strain_capping_type,
+                    strain_capping_smooth_power=strain_capping_smooth_power,
+                    need_tangent=False)
+                if not np.any(np.isnan(P_new)) and np.all(Je_try > 1e-4):
                     F = F_try
-                    P, K4 = P_new, K4_new
+                    P = P_new
                     success_step = True
                     break
             except Exception:
                 pass
-                
+
         if not success_step:
             break
 
@@ -1604,7 +2235,7 @@ def _al_step_3d(F, F_bar, Ghat4, C4, I2, I4, I4rt, Fp=None,
         GP = G_op(P)
         res = np.linalg.norm(GP) / (np.sqrt(GP.size) * (np.mean(np.abs(P)) + 1e-20))
         if res < tol and i > 0:
-            return F, P, K4, i + 1
+            return F, P, None, i + 1
 
     # If the loop finishes without returning, it means it didn't converge or broke
     GP = G_op(P)
@@ -1620,7 +2251,12 @@ def _newton_cg_step(F, F_bar, Ghat4, C4, I2, I4, I4rt,
                     tol_NW=1e-5, tol_CG=1e-6, max_NW=20,
                     model_type="svk", plane_mode="plane_strain",
                     A_m=0.0, B_m=0.0, C_m=0.0,
-                    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0):
+                    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                    strain_capping_enabled=False,
+                    strain_capping_limit=None,
+                    strain_capping_tangent_ratio=0.1,
+                    strain_capping_type="piecewise",
+                    strain_capping_smooth_power=1.0):
     """
     Run Newton-CG iterations to enforce  G : P(F) = 0
     with prescribed macroscopic deformation gradient F̄.
@@ -1649,7 +2285,12 @@ def _newton_cg_step(F, F_bar, Ghat4, C4, I2, I4, I4rt,
     P, K4, _ = constitutive_hyperelastic_2d(
         F, C4, I2, I4, I4rt, model_type=model_type, plane_mode=plane_mode,
         A_m=A_m, B_m=B_m, C_m=C_m,
-        v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+        v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+        strain_capping_enabled=strain_capping_enabled,
+        strain_capping_limit=strain_capping_limit,
+        strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+        strain_capping_type=strain_capping_type,
+        strain_capping_smooth_power=strain_capping_smooth_power)
     Fn    = np.linalg.norm(F)
 
     def G_op(A2):
@@ -1697,7 +2338,12 @@ def _newton_cg_step(F, F_bar, Ghat4, C4, I2, I4, I4rt,
         P, K4, _ = constitutive_hyperelastic_2d(
             F, C4, I2, I4, I4rt, model_type=model_type, plane_mode=plane_mode,
             A_m=A_m, B_m=B_m, C_m=C_m,
-            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+            strain_capping_enabled=strain_capping_enabled,
+            strain_capping_limit=strain_capping_limit,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+            strain_capping_type=strain_capping_type,
+            strain_capping_smooth_power=strain_capping_smooth_power)
 
         # Convergence check (skip iteration 0 as in de Geus code)
         res_norm = np.linalg.norm(dFm) / (np.linalg.norm(F) + 1e-20)
@@ -1716,7 +2362,12 @@ def finite_strain_solver_step_2d(
     enable_console=True, model_type="svk", plane_mode="plane_strain",
     A_m=0.0, B_m=0.0, C_m=0.0,
     solver="al", pixel=1.0,
-    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0
+    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+    strain_capping_enabled=False,
+    strain_capping_limit=None,
+    strain_capping_tangent_ratio=0.1,
+    strain_capping_type="piecewise",
+    strain_capping_smooth_power=1.0
 ):
     """
     Solves a single step of the finite strain problem in 2D, enforcing mixed BCs on F_bar.
@@ -1745,6 +2396,18 @@ def finite_strain_solver_step_2d(
     K4_final = None
     max_err = 0.0
 
+    # Stress-controlled F̄ components updated by the macro loop (diagonal,
+    # non-driving — same set the update loop below always targeted), plus
+    # secant history across macro iterations. This function is called once
+    # per load step, so the history resets each step by construction.
+    i_drv, j_drv = driving_component
+    _upd_mask = np.zeros((ndim, ndim), dtype=bool)
+    for _ii in range(ndim):
+        if P_mask[_ii, _ii] and (_ii, _ii) != (i_drv, j_drv):
+            _upd_mask[_ii, _ii] = True
+    prev_Fbar_sc = None
+    prev_sig_sc  = None
+
     for it_mac in range(max_iter_macro):
 
         # ---- Inner solve: AL, DBFFT, or Newton-CG ----
@@ -1754,7 +2417,12 @@ def finite_strain_solver_step_2d(
                 tol=tol_NW, max_iter=max_NW,
                 model_type=model_type, plane_mode=plane_mode,
                 A_m=A_m, B_m=B_m, C_m=C_m,
-                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
         elif solver == "dbfft":
             Lx, Ly = nx * pixel, ny * pixel
             Xi = _get_frequencies_2d(nx, ny, Lx, Ly)
@@ -1763,7 +2431,12 @@ def finite_strain_solver_step_2d(
                 tol=tol_NW, tol_CG=tol_CG, max_iter=max_NW,
                 model_type=model_type, plane_mode=plane_mode,
                 A_m=A_m, B_m=B_m, C_m=C_m,
-                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
         else:
             # --- Original Newton-CG path ---
             DbarF = F_bar_current - F_start.mean(axis=(2, 3))
@@ -1773,7 +2446,12 @@ def finite_strain_solver_step_2d(
                 F_start, C4, I2, I4, I4rt, Fp=Fp,
                 model_type=model_type, plane_mode=plane_mode,
                 A_m=A_m, B_m=B_m, C_m=C_m,
-                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
 
             def G_op(A2):
                 return _project(A2, Ghat4)
@@ -1824,7 +2502,12 @@ def finite_strain_solver_step_2d(
                             F_trial, C4, I2, I4, I4rt, Fp=Fp,
                             model_type=model_type, plane_mode=plane_mode,
                             A_m=A_m, B_m=B_m, C_m=C_m,
-                            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                            strain_capping_enabled=strain_capping_enabled,
+                            strain_capping_limit=strain_capping_limit,
+                            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                            strain_capping_type=strain_capping_type,
+                            strain_capping_smooth_power=strain_capping_smooth_power)
                         if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
                             alpha *= 0.5; continue
                         F_curr, P, K4, F33 = F_trial, P_t, K4_t, F33_t; break
@@ -1857,17 +2540,28 @@ def finite_strain_solver_step_2d(
         if max_err < tol_macro:
             break
 
-        i_drv, j_drv = driving_component
+        # Linear-compliance correction as the fallback slope, replaced
+        # per-component by a secant estimate once two macro iterates exist.
+        # The secant tracks the true (softening) tangent, which the fixed
+        # linear slope does not.
         d_F_mat = (stress_err - nu_avg * np.trace(stress_err) * np.eye(ndim)) / E_avg
         d_F_mat = np.clip(d_F_mat, -0.01, 0.01)
-
-        for ii in range(ndim):
-            for jj in range(ndim):
-                if not (P_mask[ii, jj] and ii == jj):
-                    continue
-                if (ii, jj) == (i_drv, j_drv):
-                    continue
-                F_bar_current[ii, jj] += d_F_mat[ii, jj]
+        d_sc    = d_F_mat[_upd_mask]
+        Fbar_sc = F_bar_current[_upd_mask].copy()
+        sig_sc  = Sig_mac[_upd_mask].copy()
+        if prev_Fbar_sc is not None:
+            d_F_hist   = Fbar_sc - prev_Fbar_sc
+            d_sig_hist = sig_sc - prev_sig_sc
+            with np.errstate(divide="ignore", invalid="ignore"):
+                slope = d_sig_hist / d_F_hist
+            err_sc = stress_err[_upd_mask]
+            # Only trust well-conditioned, stiffness-scale positive slopes.
+            ok = (np.isfinite(slope)
+                  & (np.abs(d_F_hist) > 1e-14)
+                  & (slope > 0.01 * E_avg))
+            d_sc[ok] = np.clip(err_sc[ok] / slope[ok], -0.01, 0.01)
+        prev_Fbar_sc, prev_sig_sc = Fbar_sc, sig_sc
+        F_bar_current[_upd_mask] += d_sc
 
         # Next outer iteration starts from the latest converged F
         F_start = F_curr
@@ -1907,7 +2601,12 @@ def finite_strain_simulation_2d(
     model_type="svk",
     A_m=0.0, B_m=0.0, C_m=0.0,
     solver="al",
-    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0
+    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+    strain_capping_enabled=False,
+    strain_capping_limit=None,
+    strain_capping_tangent_ratio=0.1,
+    strain_capping_type="piecewise",
+    strain_capping_smooth_power=1.0
 ):
     """
     Incremental 2D finite-strain simulation using the de Geus FFT Newton-CG method.
@@ -2022,7 +2721,12 @@ def finite_strain_simulation_2d(
             plane_mode=plane_mode,
             A_m=A_m, B_m=B_m, C_m=C_m,
             solver=solver, pixel=pixel,
-            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4
+            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+            strain_capping_enabled=strain_capping_enabled,
+            strain_capping_limit=strain_capping_limit,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+            strain_capping_type=strain_capping_type,
+            strain_capping_smooth_power=strain_capping_smooth_power
         )
         F_bar_init = F_bar
 
@@ -2269,7 +2973,12 @@ def finite_strain_solver_step_3d(
     enable_console=True, model_type="svk",
     A_m=0.0, B_m=0.0, C_m=0.0,
     solver="al", pixel=1.0,
-    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0
+    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+    strain_capping_enabled=False,
+    strain_capping_limit=None,
+    strain_capping_tangent_ratio=0.1,
+    strain_capping_type="piecewise",
+    strain_capping_smooth_power=1.0
 ):
     """
     Solves a single step of the finite strain problem in 3D, enforcing mixed BCs on F_bar.
@@ -2295,6 +3004,18 @@ def finite_strain_solver_step_3d(
     K4_final = None
     max_err = 0.0
 
+    # Stress-controlled F̄ components updated by the macro loop (diagonal,
+    # non-driving — same set the update loop below always targeted), plus
+    # secant history across macro iterations. This function is called once
+    # per load step, so the history resets each step by construction.
+    i_drv, j_drv = driving_component
+    _upd_mask = np.zeros((ndim, ndim), dtype=bool)
+    for _ii in range(ndim):
+        if P_mask[_ii, _ii] and (_ii, _ii) != (i_drv, j_drv):
+            _upd_mask[_ii, _ii] = True
+    prev_Fbar_sc = None
+    prev_sig_sc  = None
+
     for it_mac in range(max_iter_macro):
 
         # ---- Inner solve: AL, DBFFT, or Newton-CG ----
@@ -2303,7 +3024,12 @@ def finite_strain_solver_step_3d(
                 F_start.copy(), F_bar_current, Ghat4, C4, I2, I4, I4rt, Fp=Fp,
                 tol=tol_NW, max_iter=max_NW,
                 model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
         elif solver == "dbfft":
             Lx, Ly, Lz = nx * pixel, ny * pixel, nz * pixel
             Xi = _get_frequencies_3d(nx, ny, nz, Lx, Ly, Lz)
@@ -2311,7 +3037,12 @@ def finite_strain_solver_step_3d(
                 F_start.copy(), F_bar_current, Xi, C4, I2, I4, I4rt, Fp=Fp,
                 tol=tol_NW, tol_CG=tol_CG, max_iter=max_NW,
                 model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
         else:
             # --- Original Newton-CG path ---
             DbarF = F_bar_current - F_start.mean(axis=(2, 3, 4))
@@ -2320,7 +3051,12 @@ def finite_strain_solver_step_3d(
             P, K4 = constitutive_hyperelastic_3d(
                 F_start, C4, I2, I4, I4rt, Fp=Fp,
                 model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power)
 
             def G_op(A2):
                 return _project_3d(A2, Ghat4)
@@ -2363,7 +3099,12 @@ def finite_strain_solver_step_3d(
                         P_t, K4_t = constitutive_hyperelastic_3d(
                             F_trial, C4, I2, I4, I4rt, Fp=Fp,
                             model_type=model_type, A_m=A_m, B_m=B_m, C_m=C_m,
-                            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4)
+                            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+                            strain_capping_enabled=strain_capping_enabled,
+                            strain_capping_limit=strain_capping_limit,
+                            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                            strain_capping_type=strain_capping_type,
+                            strain_capping_smooth_power=strain_capping_smooth_power)
                         if np.any(np.isnan(P_t)) or np.any(np.isnan(K4_t)):
                             alpha *= 0.5; continue
                         F_curr, P, K4 = F_trial, P_t, K4_t; break
@@ -2396,17 +3137,28 @@ def finite_strain_solver_step_3d(
         if max_err < tol_macro:
             break
 
-        i_drv, j_drv = driving_component
+        # Linear-compliance correction as the fallback slope, replaced
+        # per-component by a secant estimate once two macro iterates exist.
+        # The secant tracks the true (softening) tangent, which the fixed
+        # linear slope does not.
         d_F_mat = (stress_err - nu_avg * np.trace(stress_err) * np.eye(ndim)) / E_avg
         d_F_mat = np.clip(d_F_mat, -0.01, 0.01)
-
-        for ii in range(ndim):
-            for jj in range(ndim):
-                if not (P_mask[ii, jj] and ii == jj):
-                    continue
-                if (ii, jj) == (i_drv, j_drv):
-                    continue
-                F_bar_current[ii, jj] += d_F_mat[ii, jj]
+        d_sc    = d_F_mat[_upd_mask]
+        Fbar_sc = F_bar_current[_upd_mask].copy()
+        sig_sc  = Sig_mac[_upd_mask].copy()
+        if prev_Fbar_sc is not None:
+            d_F_hist   = Fbar_sc - prev_Fbar_sc
+            d_sig_hist = sig_sc - prev_sig_sc
+            with np.errstate(divide="ignore", invalid="ignore"):
+                slope = d_sig_hist / d_F_hist
+            err_sc = stress_err[_upd_mask]
+            # Only trust well-conditioned, stiffness-scale positive slopes.
+            ok = (np.isfinite(slope)
+                  & (np.abs(d_F_hist) > 1e-14)
+                  & (slope > 0.01 * E_avg))
+            d_sc[ok] = np.clip(err_sc[ok] / slope[ok], -0.01, 0.01)
+        prev_Fbar_sc, prev_sig_sc = Fbar_sc, sig_sc
+        F_bar_current[_upd_mask] += d_sc
 
         F_start = F_curr
     else:
@@ -2443,7 +3195,12 @@ def finite_strain_simulation_3d(
     model_type="svk",
     A_m=0.0, B_m=0.0, C_m=0.0,
     solver="al",
-    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0
+    v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+    strain_capping_enabled=False,
+    strain_capping_limit=None,
+    strain_capping_tangent_ratio=0.1,
+    strain_capping_type="piecewise",
+    strain_capping_smooth_power=1.0
 ):
     """
     Incremental 3D finite-strain simulation using Newton-CG.
@@ -2531,7 +3288,12 @@ def finite_strain_simulation_3d(
             model_type=model_type,
             A_m=A_m, B_m=B_m, C_m=C_m,
             solver=solver, pixel=pixel,
-            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4
+            v1=v1, v2=v2, v3=v3, g1=g1, g2=g2, g3=g3, g4=g4,
+            strain_capping_enabled=strain_capping_enabled,
+            strain_capping_limit=strain_capping_limit,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+            strain_capping_type=strain_capping_type,
+            strain_capping_smooth_power=strain_capping_smooth_power
         )
         F_bar_init = F_bar
 

@@ -49,15 +49,16 @@ def parse_summary_log(filepath):
     stress_col_name = ""
     
     for i, h in enumerate(headers):
-        if h.startswith('Eps_'):
+        h_lower = h.lower()
+        if h.startswith('Eps_') or h.startswith('Eng_strain_') or 'strain' in h_lower or 'eps' in h_lower:
             strain_col_idx = i
             strain_col_name = h
-        elif h.startswith('Sig_'):
+        elif h.startswith('Sig_') or 'sig' in h_lower or 'stress' in h_lower:
             stress_col_idx = i
             stress_col_name = h
             
     if strain_col_idx == -1 or stress_col_idx == -1:
-        print("Error: Could not automatically detect strain ('Eps_') and stress ('Sig_') columns.")
+        print("Error: Could not automatically detect strain and stress columns.")
         print(f"Found headers: {headers}")
         sys.exit(1)
         

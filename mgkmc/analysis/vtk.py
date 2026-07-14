@@ -177,6 +177,39 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         nx, ny, nz = E.shape
 
     # ---------------------------
+    # Get/Inflate plastic strain field
+    # ---------------------------
+    eps_plastic = None
+    if eps_plastic_field is not None:
+        if eps_plastic_field.ndim == 4:
+            eps_p_3d = np.zeros((nx, ny, 1, 3, 3))
+            if eps_plastic_field.shape[-1] == 2:
+                eps_p_3d[:,:,0,:2,:2] = eps_plastic_field
+            else:
+                eps_p_3d[:,:,0,:,:] = eps_plastic_field
+            eps_plastic = eps_p_3d
+        else:
+            eps_plastic = eps_plastic_field
+    elif grid is not None and include_plastic:
+        eps_plastic = np.zeros((nx, ny, nz, 3, 3))
+        for i in range(nx):
+            for j in range(ny):
+                for k in range(nz):
+                    ep_val = grid[i, j, k].eps_plastic
+                    if ep_val.shape == (2, 2):
+                        eps_plastic[i, j, k, :2, :2] = ep_val
+                    else:
+                        eps_plastic[i, j, k] = ep_val
+
+    # ---------------------------
+    # Compute elastic strain field
+    # ---------------------------
+    if eps_plastic is not None:
+        eps_elastic = eps - eps_plastic
+    else:
+        eps_elastic = eps
+
+    # ---------------------------
     # 2. Coordinates (nx+1, ny+1, nz+1)
     # ---------------------------
     x = np.arange(nx+1) * pixel
@@ -224,6 +257,16 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
     eps_xz = eps[...,0,2]
     eps_yz = eps[...,1,2]
 
+    # ---- Von Mises elastic strain ----
+    tr_eps_e = np.trace(eps_elastic, axis1=3, axis2=4)[..., None, None]
+    eps_e_dev = eps_elastic - np.eye(3)[None,None,None,:,:] * tr_eps_e/3
+    eps_elastic_vm = np.sqrt((2/3) * np.sum(eps_e_dev**2, axis=(3,4)))
+
+    # ---- Engineering elastic shear strains ----
+    eps_elastic_xy = eps_elastic[...,0,1]
+    eps_elastic_xz = eps_elastic[...,0,2]
+    eps_elastic_yz = eps_elastic[...,1,2]
+
     # ---- Shear stresses ----
     sig_xy = sig[...,0,1]
     sig_xz = sig[...,0,2]
@@ -246,6 +289,16 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         "eps_xz"  : [eps_xz.ravel(order="C")],
         "eps_yz"  : [eps_yz.ravel(order="C")],
 
+        # Normal elastic strains
+        "eps_elastic_xx"  : [eps_elastic[...,0,0].ravel(order="C")],
+        "eps_elastic_yy"  : [eps_elastic[...,1,1].ravel(order="C")],
+        "eps_elastic_zz"  : [eps_elastic[...,2,2].ravel(order="C")],
+
+        # Shear elastic strains
+        "eps_elastic_xy"  : [eps_elastic_xy.ravel(order="C")],
+        "eps_elastic_xz"  : [eps_elastic_xz.ravel(order="C")],
+        "eps_elastic_yz"  : [eps_elastic_yz.ravel(order="C")],
+
         # Normal stresses
         "sig_xx"  : [sig[...,0,0].ravel(order="C")],
         "sig_yy"  : [sig[...,1,1].ravel(order="C")],
@@ -259,19 +312,16 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         # Invariant measures
         "sig_vm"  : [sig_vm.ravel(order="C")],
         "eps_vm"  : [eps_vm.ravel(order="C")],
+        "eps_elastic_vm"  : [eps_elastic_vm.ravel(order="C")],
     }
     
     if Tlocal is not None:
         cell_data["temperature"] = [Tlocal.ravel(order="C")]
     
     # ---------------------------
-    # Add plastic strain and softening data
+    # Add plastic strain data
     # ---------------------------
-    # Case A: Numba / SoA Arrays provided
-    if eps_plastic_field is not None:
-        eps_plastic = eps_plastic_field
-        
-        # Plastic strain components
+    if eps_plastic is not None:
         cell_data["eps_plastic_xx"] = [eps_plastic[...,0,0].ravel(order="C")]
         cell_data["eps_plastic_yy"] = [eps_plastic[...,1,1].ravel(order="C")]
         cell_data["eps_plastic_zz"] = [eps_plastic[...,2,2].ravel(order="C")]
@@ -279,24 +329,23 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
         cell_data["eps_plastic_xz"] = [eps_plastic[...,0,2].ravel(order="C")]
         cell_data["eps_plastic_yz"] = [eps_plastic[...,1,2].ravel(order="C")]
         
-        # Von Mises plastic strain
         tr_eps_p = np.trace(eps_plastic, axis1=3, axis2=4)[..., None, None]
         eps_p_dev = eps_plastic - np.eye(3)[None,None,None,:,:] * tr_eps_p/3
         eps_plastic_vm = np.sqrt((2/3) * np.sum(eps_p_dev**2, axis=(3,4)))
         cell_data["eps_plastic_vm"] = [eps_plastic_vm.ravel(order="C")]
-        
+
+    # ---------------------------
+    # Add softening / KMC auxiliary data
+    # ---------------------------
+    if eps_plastic_field is not None:
         # Softening Properties
         if soft_prop_field is not None:
-            # soft_prop: [g_p, g_t, ...]
             g_p = soft_prop_field[...,0]
             g_t = soft_prop_field[...,1]
             cell_data["g_p"] = [g_p.ravel(order="C")]
             cell_data["g_t"] = [g_t.ravel(order="C")]
 
-    # Case B: Legacy Grid provided
     elif grid is not None and include_plastic:
-        # Extract plastic strain field
-        eps_plastic = np.zeros((nx, ny, nz, 3, 3))
         g_p = np.zeros((nx, ny, nz))
         g_t = np.zeros((nx, ny, nz))
         flip_counts = np.zeros((nx, ny, nz))
@@ -306,34 +355,14 @@ def export_to_vtk(filename, eps, sig, E, nu, pixel=1.0,
             for j in range(ny):
                 for k in range(nz):
                     voxel = grid[i, j, k]
-                    eps_plastic[i, j, k] = voxel.eps_plastic
                     g_p[i, j, k] = voxel.g_p
                     g_t[i, j, k] = voxel.g_t
                     flip_counts[i, j, k] = voxel.flip_count_total
                     Q0_mean[i, j, k] = voxel.Q0.mean()
         
-        # Plastic strain components
-        cell_data["eps_plastic_xx"] = [eps_plastic[...,0,0].ravel(order="C")]
-        cell_data["eps_plastic_yy"] = [eps_plastic[...,1,1].ravel(order="C")]
-        cell_data["eps_plastic_zz"] = [eps_plastic[...,2,2].ravel(order="C")]
-        cell_data["eps_plastic_xy"] = [eps_plastic[...,0,1].ravel(order="C")]
-        cell_data["eps_plastic_xz"] = [eps_plastic[...,0,2].ravel(order="C")]
-        cell_data["eps_plastic_yz"] = [eps_plastic[...,1,2].ravel(order="C")]
-        
-        # Von Mises plastic strain
-        tr_eps_p = np.trace(eps_plastic, axis1=3, axis2=4)[..., None, None]
-        eps_p_dev = eps_plastic - np.eye(3)[None,None,None,:,:] * tr_eps_p/3
-        eps_plastic_vm = np.sqrt((2/3) * np.sum(eps_p_dev**2, axis=(3,4)))
-        cell_data["eps_plastic_vm"] = [eps_plastic_vm.ravel(order="C")]
-        
-        # Softening parameters
         cell_data["g_p"] = [g_p.ravel(order="C")]
         cell_data["g_t"] = [g_t.ravel(order="C")]
-        
-        # Flip count
         cell_data["flip_count"] = [flip_counts.ravel(order="C")]
-        
-        # Mean barrier height
         cell_data["Q0_mean"] = [Q0_mean.ravel(order="C")]
 
     # ---------------------------

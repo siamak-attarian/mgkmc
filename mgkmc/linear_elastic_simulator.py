@@ -3,7 +3,8 @@ from .elasticity import (compute_lame_2d, stress_from_strain_2d, green_operator_
                          compute_lame_3d, stress_from_strain_3d, green_operator_3d,
                          stress_from_strain_secant_2d, stress_from_strain_secant_3d,
                          secant_shear_field, von_mises_strain_2d, von_mises_strain_3d,
-                         stress_from_strain_landau_2d, stress_from_strain_landau_3d)
+                         stress_from_strain_landau_2d, stress_from_strain_landau_3d,
+                         rose_shear_field, stress_from_strain_rose_2d)
 from .fft import compute_wave_vectors_2d, compute_wave_vectors_3d, fft_field, ifft_field
 from .analysis.vtk import export_to_vtk
 import pyfftw.interfaces.numpy_fft as fft
@@ -848,31 +849,33 @@ def spectral_solver_secant_3d(lam, mu, d, k,
     return eps, sig_out, eps_macro, sig_macro
 
 
-def spectral_solver_landau_2d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
-                              eps_bar, eps_plastic=None,
-                              max_iter=400, tol=1e-6,
-                              verbose=False, pixel=1.0,
-                              plane_mode="plane_strain",
-                              Gamma=None, eps_init=None):
+def spectral_solver_rose_2d(lam, mu, eta, mu_floor_fraction=0.1,
+                            eps_bar=None, eps_plastic=None,
+                            max_iter=400, tol=1e-6,
+                            verbose=False, pixel=1.0,
+                            plane_mode="plane_strain",
+                            Gamma=None, eps_init=None):
     """
-    Nonlinear Lippmann-Schwinger solver for the 2-D Landau small-strain model.
+    Nonlinear Lippmann-Schwinger solver for the 2-D Rose Secant Modulus model.
     """
     lam  = np.asarray(lam, dtype=float)
     mu   = np.asarray(mu, dtype=float)
     nx, ny = lam.shape if lam.ndim == 2 else mu.shape
 
-    # Reference Lame averages for C^0
+    # Reference Lame averages
     lam_avg = float(lam.mean()) if lam.ndim > 0 else float(lam)
     mu_avg  = float(mu.mean()) if mu.ndim > 0 else float(mu)
+    
+    # As recommended, reference G_ref = 0.5 * (G_max + G_min)
+    mu_ref = 0.5 * (mu_avg + mu_floor_fraction * mu_avg)
 
     # Pre-compute Green operator if not provided
     if Gamma is None:
-        lam0_ref, mu_ref = lam_avg, mu_avg
         Lx, Ly = nx * pixel, ny * pixel
         from .fft import compute_wave_vectors_2d
         from .elasticity import green_operator_2d
         kx, ky = compute_wave_vectors_2d(nx, ny, Lx, Ly)
-        Gamma = green_operator_2d(kx, ky, lam0_ref, mu_ref)
+        Gamma = green_operator_2d(kx, ky, lam_avg, mu_ref)
 
     # Initialise strain field
     if eps_init is not None:
@@ -890,14 +893,15 @@ def spectral_solver_landau_2d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
 
     for it in range(max_iter):
         eps_el = eps - eps_plastic if eps_plastic is not None else eps
-        # 1. Landau stress
-        sig = stress_from_strain_landau_2d(
-            eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4, plane_mode=plane_mode
+        
+        # 1. Stress using Rose model
+        sig = stress_from_strain_rose_2d(
+            eps_el, lam, mu, eta, mu_floor_fraction=mu_floor_fraction, plane_mode=plane_mode
         )
 
-        # 2. Reference stress sigma^0 = C^0 : eps
+        # 2. Reference stress using C^0 = (lam_avg, mu_ref)
         tr_eps = np.trace(eps, axis1=2, axis2=3)[..., None, None]
-        sig0   = lam_avg * tr_eps * I2 + 2.0 * mu_avg * eps
+        sig0   = lam_avg * tr_eps * I2 + 2.0 * mu_ref * eps
 
         # 3. Polarisation
         tau = sig - sig0
@@ -931,14 +935,294 @@ def spectral_solver_landau_2d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
         eps  = eps_new
 
         if verbose and it % 10 == 0:
-            print(f"  [landau-LS] iter {it:04d}: rel_diff = {diff:.3e}")
+            print(f"  [rose-LS] iter {it:04d}: rel_diff = {diff:.3e}")
 
         if diff < tol:
             break
 
+    eps_el = eps - eps_plastic if eps_plastic is not None else eps
+    sig_out  = stress_from_strain_rose_2d(
+        eps_el, lam, mu, eta, mu_floor_fraction=mu_floor_fraction, plane_mode=plane_mode
+    )
+    eps_macro = eps.mean(axis=(0, 1))
+    sig_macro = sig_out.mean(axis=(0, 1))
+    return eps, sig_out, eps_macro, sig_macro
+
+
+def spectral_solver_landau_2d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
+                              eps_bar, eps_plastic=None,
+                              max_iter=400, tol=1e-6,
+                              verbose=False, pixel=1.0,
+                              plane_mode="plane_strain",
+                              Gamma=None, eps_init=None,
+                              strain_capping_enabled=False,
+                              strain_capping_limit=None,
+                              strain_capping_tangent_ratio=0.1,
+                              strain_capping_type="piecewise",
+                              strain_capping_smooth_power=1.0,
+                              solver="dbfft",
+                              e33_state=None,
+                              anderson_m=5):
+    """
+    Nonlinear Lippmann-Schwinger solver for the 2-D Landau small-strain model.
+
+    e33_state : optional dict shared across calls; warm-starts the plane-stress
+        e33 Newton solve inside the Landau stress evaluation (dbfft solver only).
+    anderson_m : Anderson-acceleration history depth for the dbfft fixed-point
+        iteration (0 disables, giving the plain Picard/basic scheme). The
+        basic scheme converges linearly at a rate set by the tangent-stiffness
+        contrast, which grows as softened/capped regions develop; Anderson
+        mixing of the last m iterates cuts the iteration count several-fold in
+        that regime at negligible per-iteration cost. Falls back to the plain
+        update whenever the least-squares mixing is ill-conditioned.
+    """
+    lam  = np.asarray(lam, dtype=float)
+    mu   = np.asarray(mu, dtype=float)
+    nx, ny = lam.shape if lam.ndim == 2 else mu.shape
+
+    # Reference Lame averages for C^0
+    lam_avg = float(lam.mean()) if lam.ndim > 0 else float(lam)
+    mu_avg  = float(mu.mean()) if mu.ndim > 0 else float(mu)
+
+    # Pre-compute Green operator if not provided
+    if Gamma is None:
+        lam0_ref, mu_ref = lam_avg, mu_avg
+        Lx, Ly = nx * pixel, ny * pixel
+        from .fft import compute_wave_vectors_2d
+        from .elasticity import green_operator_2d
+        kx, ky = compute_wave_vectors_2d(nx, ny, Lx, Ly)
+        Gamma = green_operator_2d(kx, ky, lam0_ref, mu_ref)
+
+    # Initialise strain field
+    if eps_init is not None:
+        eps = eps_init.copy()
+        for i in range(2):
+            for j in range(2):
+                eps[:, :, i, j] += eps_bar[i, j] - eps_init[:, :, i, j].mean()
+    else:
+        eps = np.zeros((nx, ny, 2, 2))
+        for i in range(2):
+            for j in range(2):
+                eps[:, :, i, j] = eps_bar[i, j]
+
+    # Pre-compute FFT planning
+    from .fft import fft_field, ifft_field
+
+    if solver == "newton_cg":
+        import scipy.sparse.linalg as sp
+        
+        # 1. Newton-CG loop
+        Dbar_eps = eps_bar - eps.mean(axis=(0, 1))
+        Dbar_eps_grid = np.einsum('ij,xy->xyij', Dbar_eps, np.ones((nx, ny)))
+
+        def apply_Gamma_2d(tau_field):
+            tau_hat = np.zeros((nx, ny, 2, 2), dtype=complex)
+            for i in range(2):
+                for j in range(2):
+                    tau_hat[:, :, i, j] = fft_field(tau_field[:, :, i, j])
+            eps_tilde_hat = -np.einsum("xykhij,xyij->xykh", Gamma, tau_hat)
+            eps_tilde = np.zeros((nx, ny, 2, 2))
+            for i in range(2):
+                for j in range(2):
+                    eps_tilde[:, :, i, j] = ifft_field(eps_tilde_hat[:, :, i, j])
+                    eps_tilde[:, :, i, j] -= eps_tilde[:, :, i, j].mean()
+            return eps_tilde
+
+        def C_dot_deps(deps_field):
+            h = 1e-7
+            eps_el = eps - eps_plastic if eps_plastic is not None else eps
+            sig_plus = stress_from_strain_landau_2d(
+                eps_el + h * deps_field, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+                plane_mode=plane_mode,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power
+            )
+            sig_minus = stress_from_strain_landau_2d(
+                eps_el - h * deps_field, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+                plane_mode=plane_mode,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power
+            )
+            return (sig_plus - sig_minus) / (2.0 * h)
+
+        def G_K_deps(deps_flat):
+            deps_field = deps_flat.reshape(nx, ny, 2, 2)
+            deps_comp = apply_Gamma_2d(deps_field)
+            dtau = C_dot_deps(deps_comp)
+            A_deps = apply_Gamma_2d(dtau)
+            return A_deps.reshape(-1)
+
+        A_op = sp.LinearOperator(
+            shape=(eps.size, eps.size),
+            matvec=G_K_deps,
+            dtype='float64'
+        )
+
+        eps_el = eps - eps_plastic if eps_plastic is not None else eps
+        sig = stress_from_strain_landau_2d(
+            eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+            plane_mode=plane_mode,
+            strain_capping_enabled=strain_capping_enabled,
+            strain_capping_limit=strain_capping_limit,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+            strain_capping_type=strain_capping_type,
+            strain_capping_smooth_power=strain_capping_smooth_power
+        )
+
+        for i_NW in range(max_iter):
+            if i_NW == 0:
+                rhs = -apply_Gamma_2d(C_dot_deps(Dbar_eps_grid)).reshape(-1)
+            else:
+                rhs = -apply_Gamma_2d(sig).reshape(-1)
+
+            try:
+                deps_flat, _ = sp.bicgstab(A_op, rhs, rtol=tol, maxiter=150)
+            except TypeError:
+                deps_flat, _ = sp.bicgstab(A_op, rhs, tol=tol, maxiter=150)
+
+            deps = deps_flat.reshape(nx, ny, 2, 2)
+            
+            if i_NW == 0:
+                eps = eps + Dbar_eps_grid + apply_Gamma_2d(deps)
+            else:
+                eps = eps + apply_Gamma_2d(deps)
+
+            eps_el = eps - eps_plastic if eps_plastic is not None else eps
+            sig = stress_from_strain_landau_2d(
+                eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+                plane_mode=plane_mode,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power
+            )
+
+            res_norm = np.linalg.norm(deps_flat) / (np.linalg.norm(eps) + 1e-20)
+            if verbose and i_NW % 1 == 0:
+                print(f"  [landau-NCG] Newton iter {i_NW:02d}: rel_diff = {res_norm:.3e}")
+
+            if res_norm < tol and i_NW > 0:
+                break
+
+        sig_out = sig
+        eps_macro = eps.mean(axis=(0, 1))
+        sig_macro = sig_out.mean(axis=(0, 1))
+        return eps, sig_out, eps_macro, sig_macro
+
+    I2 = np.eye(2)[None, None, :, :]
+
+    # Anderson-acceleration history: fixed-point images G(x) and residuals
+    # f = G(x) - x of the last (anderson_m + 1) iterates, flattened.
+    aa_g, aa_f = [], []
+
+    for it in range(max_iter):
+        eps_el = eps - eps_plastic if eps_plastic is not None else eps
+        # 1. Landau stress
+        sig = stress_from_strain_landau_2d(
+            eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+            plane_mode=plane_mode,
+            strain_capping_enabled=strain_capping_enabled,
+            strain_capping_limit=strain_capping_limit,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+            strain_capping_type=strain_capping_type,
+            strain_capping_smooth_power=strain_capping_smooth_power,
+            e33_state=e33_state
+        )
+
+        # 2. Reference stress sigma^0 = C^0 : eps
+        tr_eps = np.trace(eps, axis1=2, axis2=3)[..., None, None]
+        sig0   = lam_avg * tr_eps * I2 + 2.0 * mu_avg * eps
+
+        # 3. Polarisation
+        tau = sig - sig0
+
+        # 4. FFT of tau
+        tau_hat = np.zeros((nx, ny, 2, 2), dtype=complex)
+        for i in range(2):
+            for j in range(2):
+                tau_hat[:, :, i, j] = fft_field(tau[:, :, i, j])
+
+        # 5. Apply Green operator
+        eps_tilde_hat = -np.einsum("xykhij,xyij->xykh", Gamma, tau_hat)
+
+        eps_tilde = np.zeros((nx, ny, 2, 2))
+        for i in range(2):
+            for j in range(2):
+                eps_tilde[:, :, i, j] = ifft_field(eps_tilde_hat[:, :, i, j])
+
+        # 6. Zero-mean correction
+        for i in range(2):
+            for j in range(2):
+                eps_tilde[:, :, i, j] -= eps_tilde[:, :, i, j].mean()
+
+        # 7. Fixed-point image G(eps)
+        eps_new = np.zeros((nx, ny, 2, 2))
+        for i in range(2):
+            for j in range(2):
+                eps_new[:, :, i, j] = eps_bar[i, j] + eps_tilde[:, :, i, j]
+
+        diff = np.linalg.norm(eps_new - eps) / (np.linalg.norm(eps) + 1e-20)
+
+        if not np.isfinite(diff):
+            raise FloatingPointError(
+                "spectral_solver_landau_2d: non-finite strain update in LS loop "
+                "(Landau energy likely unstable at this strain; consider strain "
+                "capping or smaller load steps)."
+            )
+
+        if verbose and it % 10 == 0:
+            print(f"  [landau-LS] iter {it:04d}: rel_diff = {diff:.3e}")
+
+        if diff < tol:
+            eps = eps_new
+            break
+
+        # 8. Anderson (type-II) mixing of the last m iterates. Every history
+        # column is zero-mean, so the mixed iterate keeps mean(eps) = eps_bar.
+        if anderson_m > 0:
+            aa_g.append(eps_new.reshape(-1))
+            aa_f.append((eps_new - eps).reshape(-1))
+            if len(aa_f) > anderson_m + 1:
+                aa_g.pop(0)
+                aa_f.pop(0)
+        if anderson_m > 0 and len(aa_f) >= 2:
+            dF = np.stack([aa_f[i + 1] - aa_f[i]
+                           for i in range(len(aa_f) - 1)], axis=1)
+            dG = np.stack([aa_g[i + 1] - aa_g[i]
+                           for i in range(len(aa_g) - 1)], axis=1)
+            try:
+                gamma_aa, *_ = np.linalg.lstsq(dF, aa_f[-1], rcond=None)
+                eps_aa = aa_g[-1] - dG @ gamma_aa
+            except np.linalg.LinAlgError:
+                eps_aa = None
+            if eps_aa is not None and np.all(np.isfinite(eps_aa)):
+                eps = eps_aa.reshape(nx, ny, 2, 2)
+            else:
+                # Ill-conditioned mixing: plain step and restart history.
+                eps = eps_new
+                aa_g, aa_f = aa_g[-1:], aa_f[-1:]
+        else:
+            eps = eps_new
+
     # Final Landau stress
     eps_el = eps - eps_plastic if eps_plastic is not None else eps
-    sig_out  = stress_from_strain_landau_2d(eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4, plane_mode=plane_mode)
+    sig_out  = stress_from_strain_landau_2d(
+        eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+        plane_mode=plane_mode,
+        strain_capping_enabled=strain_capping_enabled,
+        strain_capping_limit=strain_capping_limit,
+        strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+        strain_capping_type=strain_capping_type,
+        strain_capping_smooth_power=strain_capping_smooth_power,
+        e33_state=e33_state
+    )
     eps_macro = eps.mean(axis=(0, 1))
     sig_macro = sig_out.mean(axis=(0, 1))
     return eps, sig_out, eps_macro, sig_macro
@@ -948,10 +1232,18 @@ def spectral_solver_landau_3d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
                               eps_bar, eps_plastic=None,
                               max_iter=400, tol=1e-6,
                               verbose=False, pixel=1.0,
-                              Gamma=None, eps_init=None):
+                              Gamma=None, eps_init=None,
+                              strain_capping_enabled=False,
+                              strain_capping_limit=None,
+                              strain_capping_tangent_ratio=0.1,
+                              strain_capping_type="piecewise",
+                              strain_capping_smooth_power=1.0,
+                              solver="dbfft"):
     """
     Nonlinear Lippmann-Schwinger solver for the 3-D Landau small-strain model.
     """
+    if solver == "newton_cg":
+        raise NotImplementedError("Newton-CG solver is not yet implemented for 3D small-strain. Please use 2D or default to dbfft solver.")
     lam  = np.asarray(lam, dtype=float)
     mu   = np.asarray(mu, dtype=float)
     nx, ny, nz = lam.shape if lam.ndim == 3 else mu.shape
@@ -987,7 +1279,12 @@ def spectral_solver_landau_3d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
         eps_el = eps - eps_plastic if eps_plastic is not None else eps
         # 1. Landau stress
         sig = stress_from_strain_landau_3d(
-            eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4
+            eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+            strain_capping_enabled=strain_capping_enabled,
+            strain_capping_limit=strain_capping_limit,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+            strain_capping_type=strain_capping_type,
+            strain_capping_smooth_power=strain_capping_smooth_power
         )
 
         # 2. Reference stress sigma^0 = C^0 : eps
@@ -1025,6 +1322,13 @@ def spectral_solver_landau_3d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
         diff = np.linalg.norm(eps_new - eps) / (np.linalg.norm(eps) + 1e-20)
         eps  = eps_new
 
+        if not np.isfinite(diff):
+            raise FloatingPointError(
+                "spectral_solver_landau_3d: non-finite strain update in LS loop "
+                "(Landau energy likely unstable at this strain; consider strain "
+                "capping or smaller load steps)."
+            )
+
         if verbose and it % 10 == 0:
             print(f"  [landau-LS 3D] iter {it:04d}: rel_diff = {diff:.3e}")
 
@@ -1033,7 +1337,14 @@ def spectral_solver_landau_3d(lam, mu, v1, v2, v3, g1, g2, g3, g4,
 
     # Final Landau stress
     eps_el = eps - eps_plastic if eps_plastic is not None else eps
-    sig_out  = stress_from_strain_landau_3d(eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4)
+    sig_out  = stress_from_strain_landau_3d(
+        eps_el, lam, mu, v1, v2, v3, g1, g2, g3, g4,
+        strain_capping_enabled=strain_capping_enabled,
+        strain_capping_limit=strain_capping_limit,
+        strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+        strain_capping_type=strain_capping_type,
+        strain_capping_smooth_power=strain_capping_smooth_power
+    )
     eps_macro = eps.mean(axis=(0, 1, 2))
     sig_macro = sig_out.mean(axis=(0, 1, 2))
     return eps, sig_out, eps_macro, sig_macro
@@ -1267,6 +1578,260 @@ def secant_elastic_simulation_2d(
 
     if vtk_interval == "last" and vtk_path:
         mu_sec = secant_shear_field(von_mises_strain_2d(eps), mu, d, k)
+        E_vtk  = mu_sec * (3.0 * lam + 2.0 * mu_sec) / (lam + mu_sec + 1e-30)
+        nu_vtk = lam / (2.0 * (lam + mu_sec) + 1e-30)
+        export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E_vtk, nu_vtk, pixel,
+                      match_matplotlib_orientation=True)
+
+    _total_time = _time.time() - _t0
+    _m, _s = divmod(_total_time, 60)
+    _h, _m = divmod(_m, 60)
+    _duration_str = f"\nSimulation Finish Time: {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}\nTotal Duration: {_total_time:.2f} seconds ({int(_h):d}h {int(_m):02d}m {int(_s):02d}s)\n"
+    if _log_f:
+        _log_f.write(_duration_str)
+        _log_f.close()
+    if _glog_f:
+        _glog_f.close()
+    if enable_console:
+        print(_duration_str)
+
+    return (np.array(eps_macro_list),
+            np.array(sig_macro_list),
+            eps_list, sig_list)
+
+
+def rose_elastic_simulation_2d(
+    lam, mu, eta, mu_floor_fraction=0.1,
+    target_strain_mask=None,
+    target_values=None,
+    n_steps=20,
+    pixel=1.0,
+    tol_ls=1e-6,
+    max_iter_ls=400,
+    tol_macro=1e-4,
+    max_iter_macro=20,
+    store=True,
+    plane_mode="plane_strain",
+    log_path=None,
+    global_log_path=None,
+    driving_component=(0, 0),
+    enable_console=True,
+    vtk_path=None,
+    vtk_interval="none",
+    **solver_kw
+):
+    """
+    Mixed stress/strain-controlled 2-D simulation using the Rose Secant Modulus
+    constitutive law.
+    """
+    import os, time as _time
+    from datetime import datetime as _dt
+
+    lam = np.asarray(lam, dtype=float)
+    mu  = np.asarray(mu, dtype=float)
+    nx, ny = lam.shape
+
+    _comp_labels = {(0,0):"xx",(1,1):"yy",(0,1):"xy",(1,0):"yx"}
+    _comp_lbl = _comp_labels.get(tuple(driving_component), "xx")
+
+    # Reference Lame averages
+    lam_avg = float(lam.mean())
+    mu_avg  = float(mu.mean())
+    
+    # As recommended, reference G_ref = 0.5 * (G_max + G_min)
+    mu_ref = 0.5 * (mu_avg + mu_floor_fraction * mu_avg)
+    
+    Lx, Ly  = nx * pixel, ny * pixel
+    kx, ky  = compute_wave_vectors_2d(nx, ny, Lx, Ly)
+    Gamma   = green_operator_2d(kx, ky, lam_avg, mu_ref)
+
+    # Strain-correction helper for stress-controlled components
+    E_avg  = mu_ref * (3.0 * lam_avg + 2.0 * mu_ref) / (lam_avg + mu_ref)
+    nu_avg = lam_avg / (2.0 * (lam_avg + mu_ref))
+
+    def get_strain_correction_2d(sigma_err):
+        tr_sig = np.trace(sigma_err)
+        return (sigma_err - nu_avg * tr_sig * np.eye(2)) / E_avg
+
+    # Logging
+    _log_f = None
+    if log_path:
+        _log_f = open(log_path, "w", buffering=1)
+        _hdr = (f"{'Timestamp':<20} {'Elapsed(s)':<12} {'Step':<8} "
+                f"{'Eps_'+_comp_lbl:<14} {'Sig_'+_comp_lbl+'(GPa)':<16}\n")
+        _log_f.write(_hdr)
+        _log_f.write("-" * len(_hdr.rstrip()) + "\n")
+    _glog_f = None
+    if global_log_path:
+        _glog_f = open(global_log_path, "w", buffering=1)
+        _ghdr = (f"{'GlobalStep':<12} {'Eps_xx':<14} {'Eps_yy':<14} {'Eps_xy':<14} "
+                 f"{'Sig_xx(GPa)':<16} {'Sig_yy(GPa)':<16} {'Sig_xy(GPa)':<16}\n")
+        _glog_f.write(_ghdr)
+        _glog_f.write("-" * len(_ghdr.rstrip()) + "\n")
+    _t0 = _time.time()
+
+    # Checkpoint / VTK settings from solver_kw
+    chk_ival = solver_kw.pop("checkpoint_interval", None)
+    chk_path = solver_kw.pop("checkpoint_path", "checkpoint")
+    if chk_path and chk_ival not in [None, "none"]:
+        os.makedirs(os.path.dirname(chk_path) or ".", exist_ok=True)
+
+    targets_path = np.zeros((n_steps + 1, 2, 2))
+    for s in range(n_steps + 1):
+        targets_path[s] = target_values * (s / n_steps)
+
+    eps_macro_list = []
+    sig_macro_list = []
+    eps_list       = []
+    sig_list       = []
+
+    current_eps_bar = np.zeros((2, 2))
+    eps_warm        = None
+    stress_mask     = ~target_strain_mask
+
+    for s in range(n_steps + 1):
+        target_s = targets_path[s]
+        max_err  = 0.0
+
+        for it_macro in range(max_iter_macro):
+            current_eps_bar[target_strain_mask] = target_s[target_strain_mask]
+
+            eps, sig, epsM, sigM = spectral_solver_rose_2d(
+                lam, mu, eta, mu_floor_fraction=mu_floor_fraction,
+                eps_bar=current_eps_bar,
+                max_iter=max_iter_ls, tol=tol_ls,
+                pixel=pixel, plane_mode=plane_mode,
+                Gamma=Gamma, eps_init=eps_warm
+            )
+
+            stress_err = np.zeros((2, 2))
+            stress_err[stress_mask] = target_s[stress_mask] - sigM[stress_mask]
+            max_err = (np.max(np.abs(stress_err[stress_mask]))
+                       if np.any(stress_mask) else 0.0)
+
+            if max_err < tol_macro:
+                break
+
+            d_eps = get_strain_correction_2d(stress_err)
+            current_eps_bar[stress_mask] += d_eps[stress_mask]
+        else:
+            print(f"Warning: Macro loop did not converge at step {s} (err={max_err:.2e})")
+
+        eps_warm = eps
+
+        eps_macro_list.append(epsM)
+        sig_macro_list.append(sigM)
+        if store:
+            eps_list.append(eps)
+            sig_list.append(sig)
+
+        _i, _j = driving_component
+        _eps_drv = epsM[_i, _j]
+        _sig_drv = sigM[_i, _j]
+        if enable_console:
+            print(f"step {s}/{n_steps}: "
+                  f"eps_{_comp_lbl}={_eps_drv:.4f}, "
+                  f"sig_{_comp_lbl}={_sig_drv/1e9:.4f} GPa")
+        if _log_f:
+            _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+            _elapsed = _time.time() - _t0
+            _log_f.write(
+                f"{_now:<20} {_elapsed:<12.3f} {s:<8} "
+                f"{_eps_drv:<14.6f} {_sig_drv/1e9:<16.6f}\n"
+            )
+        if _glog_f:
+            _glog_f.write(
+                f"{s:<12} "
+                f"{epsM[0,0]:<14.6f} {epsM[1,1]:<14.6f} {epsM[0,1]:<14.6f} "
+                f"{sigM[0,0]/1e9:<16.6f} {sigM[1,1]/1e9:<16.6f} {sigM[0,1]/1e9:<16.6f}\n"
+            )
+
+        if chk_ival is not None and chk_ival not in ["none", "last"]:
+            save_chk, cp_name = False, None
+            if chk_ival == "current":
+                save_chk, cp_name = True, f"{chk_path}.h5"
+            elif isinstance(chk_ival, int) and s % chk_ival == 0:
+                save_chk, cp_name = True, f"{chk_path}_{s:06d}.h5"
+            if save_chk and cp_name:
+                save_checkpoint_2d(cp_name, s, None, None, eps, sig, epsM, sigM, pixel)
+
+        if vtk_interval is not None and vtk_interval not in ["none", "last"]:
+            save_vtk, vt_name = False, None
+            if vtk_interval == "current":
+                vt_name = f"{vtk_path}.vtu"
+                save_vtk = True
+            elif isinstance(vtk_interval, int) and s % vtk_interval == 0:
+                vt_name = f"{vtk_path}_{s:06d}.vtu"
+                save_vtk = True
+            if save_vtk and vt_name:
+                # Compute G_sec for VTK export
+                eps_xx = eps[..., 0, 0]
+                eps_yy = eps[..., 1, 1]
+                eps_xy = eps[..., 0, 1]
+                if plane_mode == "plane_stress":
+                    eps_zz = -lam / (lam + 2.0 * mu) * (eps_xx + eps_yy)
+                    K = lam + (2.0 / 3.0) * mu
+                    for _ in range(5):
+                        tr = eps_xx + eps_yy + eps_zz
+                        tr3 = tr / 3.0
+                        ep11 = eps_xx - tr3
+                        ep22 = eps_yy - tr3
+                        ep33 = eps_zz - tr3
+                        eps_eq = np.sqrt((2.0 / 3.0) * (ep11**2 + ep22**2 + ep33**2 + 2.0 * eps_xy**2))
+                        G_sec = rose_shear_field(eps_eq, mu, eta, mu_floor_fraction)
+                        num = 3.0 * K - 2.0 * G_sec
+                        den = 3.0 * K + 4.0 * G_sec
+                        eps_zz = - (num / den) * (eps_xx + eps_yy)
+                    mu_sec = G_sec
+                else:
+                    eps_zz = np.zeros_like(eps_xx)
+                    tr = eps_xx + eps_yy
+                    tr3 = tr / 3.0
+                    ep11 = eps_xx - tr3
+                    ep22 = eps_yy - tr3
+                    ep33 = eps_zz - tr3
+                    eps_eq = np.sqrt((2.0 / 3.0) * (ep11**2 + ep22**2 + ep33**2 + 2.0 * eps_xy**2))
+                    mu_sec = rose_shear_field(eps_eq, mu, eta, mu_floor_fraction)
+                
+                E_vtk  = mu_sec * (3.0 * lam + 2.0 * mu_sec) / (lam + mu_sec + 1e-30)
+                nu_vtk = lam / (2.0 * (lam + mu_sec) + 1e-30)
+                export_to_vtk(vt_name, eps, sig, E_vtk, nu_vtk, pixel,
+                              match_matplotlib_orientation=True)
+
+    if chk_ival == "last":
+        save_checkpoint_2d(f"{chk_path}_final.h5", n_steps,
+                           None, None, eps, sig, epsM, sigM, pixel)
+
+    if vtk_interval == "last" and vtk_path:
+        # Compute G_sec for final VTK export
+        eps_xx = eps[..., 0, 0]
+        eps_yy = eps[..., 1, 1]
+        eps_xy = eps[..., 0, 1]
+        if plane_mode == "plane_stress":
+            eps_zz = -lam / (lam + 2.0 * mu) * (eps_xx + eps_yy)
+            K = lam + (2.0 / 3.0) * mu
+            for _ in range(5):
+                tr = eps_xx + eps_yy + eps_zz
+                tr3 = tr / 3.0
+                ep11 = eps_xx - tr3
+                ep22 = eps_yy - tr3
+                ep33 = eps_zz - tr3
+                eps_eq = np.sqrt((2.0 / 3.0) * (ep11**2 + ep22**2 + ep33**2 + 2.0 * eps_xy**2))
+                G_sec = rose_shear_field(eps_eq, mu, eta, mu_floor_fraction)
+                num = 3.0 * K - 2.0 * G_sec
+                den = 3.0 * K + 4.0 * G_sec
+                eps_zz = - (num / den) * (eps_xx + eps_yy)
+            mu_sec = G_sec
+        else:
+            eps_zz = np.zeros_like(eps_xx)
+            tr = eps_xx + eps_yy
+            tr3 = tr / 3.0
+            ep11 = eps_xx - tr3
+            ep22 = eps_yy - tr3
+            ep33 = eps_zz - tr3
+            eps_eq = np.sqrt((2.0 / 3.0) * (ep11**2 + ep22**2 + ep33**2 + 2.0 * eps_xy**2))
+            mu_sec = rose_shear_field(eps_eq, mu, eta, mu_floor_fraction)
+        
         E_vtk  = mu_sec * (3.0 * lam + 2.0 * mu_sec) / (lam + mu_sec + 1e-30)
         nu_vtk = lam / (2.0 * (lam + mu_sec) + 1e-30)
         export_to_vtk(f"{vtk_path}_final.vtu", eps, sig, E_vtk, nu_vtk, pixel,
@@ -1552,6 +2117,14 @@ def landau_elastic_simulation_2d(
         _glog_f.write("-" * len(_ghdr.rstrip()) + "\n")
     _t0 = _time.time()
 
+    # Extract capping and solver arguments
+    solver = solver_kw.pop("solver", "dbfft")
+    strain_capping_enabled = solver_kw.pop("strain_capping_enabled", False)
+    strain_capping_limit = solver_kw.pop("strain_capping_limit", None)
+    strain_capping_tangent_ratio = solver_kw.pop("strain_capping_tangent_ratio", 0.1)
+    strain_capping_type = solver_kw.pop("strain_capping_type", "piecewise")
+    strain_capping_smooth_power = solver_kw.pop("strain_capping_smooth_power", 1.0)
+
     # Checkpoint / VTK settings from solver_kw
     chk_ival = solver_kw.pop("checkpoint_interval", None)
     chk_path = solver_kw.pop("checkpoint_path", "checkpoint")
@@ -1570,10 +2143,17 @@ def landau_elastic_simulation_2d(
     current_eps_bar = np.zeros((2, 2))
     eps_warm        = None
     stress_mask     = ~target_strain_mask
+    e33_state       = {} if plane_mode == "plane_stress" else None
 
     for s in range(n_steps + 1):
         target_s = targets_path[s]
         max_err  = 0.0
+
+        # Secant history for the stress-controlled components. Reset each load
+        # step: the driven strain changes between steps, which would pollute a
+        # cross-step slope estimate.
+        prev_eps_sc = None
+        prev_sig_sc = None
 
         for it_macro in range(max_iter_macro):
             current_eps_bar[target_strain_mask] = target_s[target_strain_mask]
@@ -1583,7 +2163,14 @@ def landau_elastic_simulation_2d(
                 current_eps_bar,
                 max_iter=max_iter_ls, tol=tol_ls,
                 pixel=pixel, plane_mode=plane_mode,
-                Gamma=Gamma, eps_init=eps_warm
+                Gamma=Gamma, eps_init=eps_warm,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power,
+                solver=solver,
+                e33_state=e33_state
             )
 
             stress_err = np.zeros((2, 2))
@@ -1594,8 +2181,27 @@ def landau_elastic_simulation_2d(
             if max_err < tol_macro:
                 break
 
+            # Linear-compliance correction as the fallback slope, replaced
+            # per-component by a secant estimate once two macro iterates exist.
+            # The secant tracks the true (softening) Landau tangent, which the
+            # fixed linear slope does not.
             d_eps = get_strain_correction_2d(stress_err)
-            current_eps_bar[stress_mask] += d_eps[stress_mask]
+            d_sc  = d_eps[stress_mask]
+            eps_sc = current_eps_bar[stress_mask].copy()
+            sig_sc = sigM[stress_mask].copy()
+            if prev_eps_sc is not None:
+                d_eps_hist = eps_sc - prev_eps_sc
+                d_sig_hist = sig_sc - prev_sig_sc
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    slope = d_sig_hist / d_eps_hist
+                err_sc = stress_err[stress_mask]
+                # Only trust well-conditioned, stiffness-scale positive slopes.
+                ok = (np.isfinite(slope)
+                      & (np.abs(d_eps_hist) > 1e-14)
+                      & (slope > 0.01 * E_avg))
+                d_sc[ok] = err_sc[ok] / slope[ok]
+            prev_eps_sc, prev_sig_sc = eps_sc, sig_sc
+            current_eps_bar[stress_mask] += d_sc
         else:
             print(f"Warning: Macro loop did not converge at step {s} (err={max_err:.2e})")
 
@@ -1747,6 +2353,14 @@ def landau_elastic_simulation_3d(
         _glog_f.write("-" * len(_ghdr.rstrip()) + "\n")
     _t0 = _time.time()
 
+    # Extract capping and solver arguments
+    solver = solver_kw.pop("solver", "dbfft")
+    strain_capping_enabled = solver_kw.pop("strain_capping_enabled", False)
+    strain_capping_limit = solver_kw.pop("strain_capping_limit", None)
+    strain_capping_tangent_ratio = solver_kw.pop("strain_capping_tangent_ratio", 0.1)
+    strain_capping_type = solver_kw.pop("strain_capping_type", "piecewise")
+    strain_capping_smooth_power = solver_kw.pop("strain_capping_smooth_power", 1.0)
+
     # Checkpoint / VTK settings from solver_kw
     chk_ival = solver_kw.pop("checkpoint_interval", None)
     chk_path = solver_kw.pop("checkpoint_path", "checkpoint")
@@ -1770,6 +2384,12 @@ def landau_elastic_simulation_3d(
         target_s = targets_path[s]
         max_err  = 0.0
 
+        # Secant history for the stress-controlled components (see the 2-D
+        # driver). Reset each load step: the driven strain changes between
+        # steps, which would pollute a cross-step slope estimate.
+        prev_eps_sc = None
+        prev_sig_sc = None
+
         for it_macro in range(max_iter_macro):
             current_eps_bar[target_strain_mask] = target_s[target_strain_mask]
 
@@ -1778,7 +2398,13 @@ def landau_elastic_simulation_3d(
                 current_eps_bar,
                 max_iter=max_iter_ls, tol=tol_ls,
                 pixel=pixel,
-                Gamma=Gamma, eps_init=eps_warm
+                Gamma=Gamma, eps_init=eps_warm,
+                strain_capping_enabled=strain_capping_enabled,
+                strain_capping_limit=strain_capping_limit,
+                strain_capping_tangent_ratio=strain_capping_tangent_ratio,
+                strain_capping_type=strain_capping_type,
+                strain_capping_smooth_power=strain_capping_smooth_power,
+                solver=solver
             )
 
             stress_err = np.zeros((3, 3))
@@ -1789,8 +2415,25 @@ def landau_elastic_simulation_3d(
             if max_err < tol_macro:
                 break
 
+            # Linear-compliance correction as the fallback slope, replaced
+            # per-component by a secant estimate once two macro iterates exist
+            # (tracks the softening Landau tangent; see the 2-D driver).
             d_eps = get_strain_correction_3d(stress_err)
-            current_eps_bar[stress_mask] += d_eps[stress_mask]
+            d_sc  = d_eps[stress_mask]
+            eps_sc = current_eps_bar[stress_mask].copy()
+            sig_sc = sigM[stress_mask].copy()
+            if prev_eps_sc is not None:
+                d_eps_hist = eps_sc - prev_eps_sc
+                d_sig_hist = sig_sc - prev_sig_sc
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    slope = d_sig_hist / d_eps_hist
+                err_sc = stress_err[stress_mask]
+                ok = (np.isfinite(slope)
+                      & (np.abs(d_eps_hist) > 1e-14)
+                      & (slope > 0.01 * E_avg))
+                d_sc[ok] = err_sc[ok] / slope[ok]
+            prev_eps_sc, prev_sig_sc = eps_sc, sig_sc
+            current_eps_bar[stress_mask] += d_sc
         else:
             print(f"Warning: Macro loop did not converge at step {s} (err={max_err:.2e})")
 

@@ -84,6 +84,19 @@ material:
   d: 0.0                          # Max degradation fraction (0.0 = no degradation, 1.0 = total softening)
   k: 0.0                          # Degradation rate parameter (larger values lead to faster softening)
 
+  # --- Rose Secant Modulus Parameters ---
+  # Only used when hyperelastic_model is "rose"
+  eta: 5.0                        # Softening rate parameter (dimensionless, typical fit: ~5.0)
+  mu_floor_fraction: 0.1          # Min shear modulus floor fraction (G_floor = mu_floor_fraction * G0)
+
+  # --- Finite Strain Capping/Regularization Parameters ---
+  # Only used when strain_assumption is "finite_strain" and hyperelastic_model is "landau"
+  strain_capping_enabled: false   # Enable strain capping regularization to prevent unphysical softening divergence
+  strain_capping_limit: null      # Green-Lagrange shear equivalent strain capping limit (set to null/0 for automatic physical calculation)
+  strain_capping_tangent_ratio: 0.1   # Ratio of residual tangent shear modulus to initial shear modulus (e.g. 0.1 for 10% floor, 0.05 for 5% floor)
+  strain_capping_type: "piecewise" # Capping type: "piecewise" (exactly match Landau then linear with floor) or "smooth" (tanh mapping)
+  strain_capping_smooth_power: 1.0 # Exponent power p for "smooth" capping (larger values e.g. 4.0 delay activation, staying closer to exact Landau before transition)
+
 # ------------------------------------------------------------------------------
 # Physics & Softening
 # ------------------------------------------------------------------------------

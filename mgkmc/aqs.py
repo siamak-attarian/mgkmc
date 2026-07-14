@@ -44,7 +44,12 @@ class ThermalSimulation:
                  hyperelastic_model="svk",
                  A_m=0.0, B_m=0.0, C_m=0.0,
                  solver="al",
-                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0
+                 v1=0.0, v2=0.0, v3=0.0, g1=0.0, g2=0.0, g3=0.0, g4=0.0,
+                 strain_capping_enabled=False,
+                 strain_capping_limit=None,
+                 strain_capping_tangent_ratio=0.1,
+                 strain_capping_type="piecewise",
+                 strain_capping_smooth_power=1.0
                  ):
         """
         Initialize Athermal Quasi-Static Simulation (with Thermal extensions) using Numba/SoA.
@@ -182,6 +187,11 @@ class ThermalSimulation:
         self.g2 = g2
         self.g3 = g3
         self.g4 = g4
+        self.strain_capping_enabled = strain_capping_enabled
+        self.strain_capping_limit = strain_capping_limit
+        self.strain_capping_tangent_ratio = strain_capping_tangent_ratio
+        self.strain_capping_type = strain_capping_type
+        self.strain_capping_smooth_power = strain_capping_smooth_power
 
         # Fast Patching (Predictor-Corrector) Setup
         self.fast_patching_enabled = fast_patching.get('enabled', False) if fast_patching else False
@@ -283,7 +293,13 @@ class ThermalSimulation:
                 enable_console=False,
                 model_type=self.hyperelastic_model,
                 A_m=self.A_m, B_m=self.B_m, C_m=self.C_m,
-                solver=self.solver, pixel=self.pixel
+                solver=self.solver, pixel=self.pixel,
+                v1=self.v1, v2=self.v2, v3=self.v3, g1=self.g1, g2=self.g2, g3=self.g3, g4=self.g4,
+                strain_capping_enabled=self.strain_capping_enabled,
+                strain_capping_limit=self.strain_capping_limit,
+                strain_capping_tangent_ratio=self.strain_capping_tangent_ratio,
+                strain_capping_type=self.strain_capping_type,
+                strain_capping_smooth_power=self.strain_capping_smooth_power
             )
             
             self.F_field = np.einsum('ijxyz->xyzij', F_out)
@@ -321,7 +337,13 @@ class ThermalSimulation:
                     v1=self.v1, v2=self.v2, v3=self.v3,
                     g1=self.g1, g2=self.g2, g3=self.g3, g4=self.g4,
                     eps_bar=self.eps_macro, eps_plastic=self.eps_plastic,
-                    pixel=self.pixel, **self.solver_args
+                    pixel=self.pixel,
+                    strain_capping_enabled=self.strain_capping_enabled,
+                    strain_capping_limit=self.strain_capping_limit,
+                    strain_capping_tangent_ratio=self.strain_capping_tangent_ratio,
+                    strain_capping_type=self.strain_capping_type,
+                    strain_capping_smooth_power=self.strain_capping_smooth_power,
+                    **self.solver_args
                 )
             else:
                 self.eps_field, self.sig_field, _, _ = update_stress_fft_full(

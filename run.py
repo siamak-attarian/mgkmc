@@ -154,6 +154,17 @@ def main():
     # Load Secant Degradation parameters (d, k)
     d_val = float(mat_conf.get('d', 0.0))
     k_val = float(mat_conf.get('k', 0.0))
+    eta_val = float(mat_conf.get('eta', 5.0))
+    mu_floor_fraction_val = float(mat_conf.get('mu_floor_fraction', 0.1))
+
+    # Load strain capping parameters
+    strain_capping_enabled_val = bool(mat_conf.get('strain_capping_enabled', False))
+    strain_capping_limit_val = mat_conf.get('strain_capping_limit', None)
+    if strain_capping_limit_val is not None:
+        strain_capping_limit_val = float(strain_capping_limit_val)
+    strain_capping_tangent_ratio_val = float(mat_conf.get('strain_capping_tangent_ratio', 0.1))
+    strain_capping_type_val = str(mat_conf.get('strain_capping_type', 'piecewise'))
+    strain_capping_smooth_power_val = float(mat_conf.get('strain_capping_smooth_power', 1.0))
 
     # Load Landau parameters (v1, v2, v3, g1, g2, g3, g4)
     v1_val = float(mat_conf.get('v1', 0.0))
@@ -319,6 +330,8 @@ def main():
             C_m=C_val,
             d=d_val,
             k=k_val,
+            eta=eta_val,
+            mu_floor_fraction=mu_floor_fraction_val,
             solver=solver,
             v1=v1_val,
             v2=v2_val,
@@ -326,7 +339,12 @@ def main():
             g1=g1_val,
             g2=g2_val,
             g3=g3_val,
-            g4=g4_val
+            g4=g4_val,
+            strain_capping_enabled=strain_capping_enabled_val,
+            strain_capping_limit=strain_capping_limit_val,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio_val,
+            strain_capping_type=strain_capping_type_val,
+            strain_capping_smooth_power=strain_capping_smooth_power_val
         )
     else:
         print("Initializing 3D ThermalSimulation environment...")
@@ -384,7 +402,12 @@ def main():
             g1=g1_val,
             g2=g2_val,
             g3=g3_val,
-            g4=g4_val
+            g4=g4_val,
+            strain_capping_enabled=strain_capping_enabled_val,
+            strain_capping_limit=strain_capping_limit_val,
+            strain_capping_tangent_ratio=strain_capping_tangent_ratio_val,
+            strain_capping_type=strain_capping_type_val,
+            strain_capping_smooth_power=strain_capping_smooth_power_val
         )
 
     # ---------------------------------------------------------
@@ -502,7 +525,12 @@ def main():
                         g1=g1_val,
                         g2=g2_val,
                         g3=g3_val,
-                        g4=g4_val
+                        g4=g4_val,
+                        strain_capping_enabled=strain_capping_enabled_val,
+                        strain_capping_limit=strain_capping_limit_val,
+                        strain_capping_tangent_ratio=strain_capping_tangent_ratio_val,
+                        strain_capping_type=strain_capping_type_val,
+                        strain_capping_smooth_power=strain_capping_smooth_power_val
                     )
 
                 generate_elastic_plot(F_mac_arr, Sig_mac_arr, component, out_dir, is_finite=True)
@@ -576,6 +604,64 @@ def main():
                           f"Logs written to {out_dir}.")
                     return
 
+                elif hyperelastic_model == 'rose':
+                    from mgkmc.linear_elastic_simulator import rose_elastic_simulation_2d
+
+                    # Derive lam/mu from E/nu (or read directly if supplied)
+                    if 'mu' in mat_conf and 'lambda' in mat_conf:
+                        mu_mode, mu_val, mu_params = parse_material_property(mat_conf.get('mu'), 26.92)
+                        lam_mode, lam_val, lam_params  = parse_material_property(mat_conf.get('lambda'), 40.38)
+                        mu_field_sec = generate_field(mu_mode, shape, constant_val=mu_val, params=mu_params)
+                        lam_field_sec = generate_field(lam_mode, shape, constant_val=lam_val, params=lam_params)
+                        if mu_field_sec.mean() < 1e6:
+                            mu_field_sec *= 1e9
+                        if lam_field_sec.mean() < 1e6:
+                            lam_field_sec *= 1e9
+                    else:
+                        # Compute from E, nu (plane-strain convention)
+                        lam_field_sec = E_field * nu_field / ((1.0 + nu_field) * (1.0 - 2.0 * nu_field))
+                        mu_field_sec = E_field / (2.0 * (1.0 + nu_field))
+
+                    target_strain_mask = np.ones((2, 2), dtype=bool)
+                    target_values      = np.zeros((2, 2))
+                    target_strain_mask[component] = True
+                    target_values[component]      = eps_target
+                    for key, val in stress_targets.items():
+                        if key[0] < 2 and key[1] < 2:
+                            target_values[key]      = val
+                            target_strain_mask[key] = False
+
+                    chk_val = parse_interval(out_conf.get('checkpoint_interval', 'none'))
+                    vtk_val = parse_interval(out_conf.get('vtk_interval', 'none'))
+
+                    print(f"\nRunning 2D Rose Secant Modulus Solver ({plane_mode}) "
+                          f"for {calculated_n_steps} steps "
+                          f"[eta={eta_val:.4f}, mu_floor_fraction={mu_floor_fraction_val:.2f}]...")
+                    eps_mac_list, sig_mac_list, eps_list, sig_list = \
+                        rose_elastic_simulation_2d(
+                            lam=lam_field_sec, mu=mu_field_sec,
+                            eta=eta_val, mu_floor_fraction=mu_floor_fraction_val,
+                            target_strain_mask=target_strain_mask,
+                            target_values=target_values,
+                            n_steps=calculated_n_steps,
+                            pixel=sys_conf['pixel'],
+                            plane_mode=plane_mode,
+                            store=True,
+                            tol_macro=tol_macro_pa,
+                            log_path=log_path,
+                            global_log_path=global_log_path,
+                            driving_component=component,
+                            enable_console=enable_console,
+                            checkpoint_interval=chk_val,
+                            checkpoint_path=os.path.join(out_dir, 'checkpoint'),
+                            vtk_interval=vtk_val,
+                            vtk_path=os.path.join(out_dir, 'step')
+                        )
+                    generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
+                    print(f"2D Rose Elastic simulation completed. "
+                          f"Logs written to {out_dir}.")
+                    return
+
                 elif hyperelastic_model == 'landau':
                     from mgkmc.linear_elastic_simulator import landau_elastic_simulation_2d
 
@@ -626,7 +712,13 @@ def main():
                             checkpoint_interval=chk_val,
                             checkpoint_path=os.path.join(out_dir, 'checkpoint'),
                             vtk_interval=vtk_val,
-                            vtk_path=os.path.join(out_dir, 'step')
+                            vtk_path=os.path.join(out_dir, 'step'),
+                            strain_capping_enabled=strain_capping_enabled_val,
+                            strain_capping_limit=strain_capping_limit_val,
+                            strain_capping_tangent_ratio=strain_capping_tangent_ratio_val,
+                            strain_capping_type=strain_capping_type_val,
+                            strain_capping_smooth_power=strain_capping_smooth_power_val,
+                            solver=solver
                         )
                     generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
                     print(f"2D Landau Elastic simulation completed. Logs written to {out_dir}.")
@@ -722,7 +814,12 @@ def main():
                         g1=g1_val,
                         g2=g2_val,
                         g3=g3_val,
-                        g4=g4_val
+                        g4=g4_val,
+                        strain_capping_enabled=strain_capping_enabled_val,
+                        strain_capping_limit=strain_capping_limit_val,
+                        strain_capping_tangent_ratio=strain_capping_tangent_ratio_val,
+                        strain_capping_type=strain_capping_type_val,
+                        strain_capping_smooth_power=strain_capping_smooth_power_val
                     )
 
                 generate_elastic_plot(F_mac_arr, Sig_mac_arr, component, out_dir, is_finite=True)
@@ -821,7 +918,13 @@ def main():
                             checkpoint_interval=chk_val,
                             checkpoint_path=os.path.join(out_dir, "checkpoint"),
                             vtk_interval=vtk_val,
-                            vtk_path=os.path.join(out_dir, "step")
+                            vtk_path=os.path.join(out_dir, "step"),
+                            strain_capping_enabled=strain_capping_enabled_val,
+                            strain_capping_limit=strain_capping_limit_val,
+                            strain_capping_tangent_ratio=strain_capping_tangent_ratio_val,
+                            strain_capping_type=strain_capping_type_val,
+                            strain_capping_smooth_power=strain_capping_smooth_power_val,
+                            solver=solver
                         )
                     generate_elastic_plot(eps_mac_list, sig_mac_list, component, out_dir)
                     print(f"3D Landau Elastic simulation completed. Logs written to {out_dir}.")

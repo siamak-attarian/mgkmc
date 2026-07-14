@@ -1,0 +1,30 @@
+seed: 42
+simulation_type: "elastic"
+
+system:
+  dimensionality: "2d"
+  plane_mode: "plane_stress"
+  strain_assumption: "small_strain"
+  hyperelastic_model: "rose"
+  nx: 8
+  ny: 8
+  pixel: 1.0
+
+material:
+  lambda: 80.92
+  mu: 23.73
+  eta: 5.0
+  mu_floor_fraction: 0.1
+
+loading:
+  eps_target: 0.02
+  step_size: 5.0e-3
+
+boundary_conditions:
+  driving_component: "xx"
+  mixed_targets:
+    yy: 0.0
+
+output:
+  directory: "output_test_config_rose"
+  enable_console: true
