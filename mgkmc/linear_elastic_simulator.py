@@ -629,13 +629,15 @@ def spectral_solver_secant_2d(lam, mu, d, k,
 
     Algorithm (nonlinear Moulinec-Suquet fixed-point)
     -------------------------------------------------
-    Reference stiffness C^0 = (lam_avg, mu_avg) is held *fixed* (undegraded).
-    Each iteration:
-        1. Compute sigma_secant(eps - eps_plastic).
-        2. Compute reference stress  sigma^0 = lam_avg*tr(eps - eps_plastic)*I + 2*mu_avg*(eps - eps_plastic).
-        3. Polarisation stress  tau = sigma_secant - sigma^0.
-        4. Apply Green operator:  eps_tilde = -Gamma^0 * tau.
-        5. Update:  eps = eps_bar + eps_tilde  (mean-corrected).
+    Reference stiffness ``C^0 = (lam_avg, mu_avg)`` is held *fixed*
+    (undegraded). Each iteration:
+
+    1. Compute ``sigma_secant(eps - eps_plastic)``.
+    2. Compute the reference stress
+       ``sigma^0 = lam_avg*tr(eps - eps_plastic)*I + 2*mu_avg*(eps - eps_plastic)``.
+    3. Polarisation stress ``tau = sigma_secant - sigma^0``.
+    4. Apply the Green operator: ``eps_tilde = -Gamma^0 * tau``.
+    5. Update ``eps = eps_bar + eps_tilde`` (mean-corrected).
 
     Parameters
     ----------

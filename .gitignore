@@ -1,15 +1,74 @@
-examples/*/
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
 __pycache__/
 **/__pycache__/
-original_C_code
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.tox/
+.venv/
+venv/
+
+# ---------------------------------------------------------------------------
+# Simulation output
+# ---------------------------------------------------------------------------
+# Runs write into the directory named by `output.directory` in the config; the
+# defaults below cover the conventions used by run.py, the tests and the
+# examples. Nothing produced by a run belongs in the repository.
 simulation_results/
-*.txt
+output/
+output_*/
 *.npy
 *.h5
-*.png
 *.pkl
 *.db
-.vscode/
+*.vtu
+*.vti
 
-# Sphinx build
+# Log files (summary_log.txt, global_log.txt, ...). requirements.txt and the
+# LICENSE are already tracked, so this rule cannot drop them.
+*.txt
+
+# Figures. docs/_static holds the figures the README and Sphinx docs embed, so
+# those are explicitly kept.
+*.png
+!docs/_static/*.png
+
+# ---------------------------------------------------------------------------
+# examples/
+# ---------------------------------------------------------------------------
+# examples/ doubles as a personal scratch area. Only the six curated example
+# directories are published, and within them only the .yaml configs and their
+# README.md -- those files are tracked explicitly (git add -f), so this blanket
+# rule keeps run outputs and work-in-progress scenarios out of `git status`
+# without hiding edits to anything already tracked.
+examples/*/
+
+# ---------------------------------------------------------------------------
+# Docs / editors / OS
+# ---------------------------------------------------------------------------
 docs/_build/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Local reference material and scratch work, not part of the package
+# ---------------------------------------------------------------------------
+# scratch/ and dev/ hold exploratory scripts. dev/ is tracked (it is useful to
+# others reading the repo); scratch/ is purely local.
+scratch/
+original_C_code
+
+# Untracked from the repository but deliberately left on disk for now:
+#   __init__.py       - a stray `from .mgkmc import *` that made the repo root
+#                       itself a package; nothing imports it.
+#   inspect_solver.py - reads mgkmc/solver.py, a file that no longer exists.
+# Both can be deleted outright.
+/__init__.py
+/inspect_solver.py

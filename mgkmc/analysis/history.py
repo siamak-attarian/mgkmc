@@ -50,13 +50,12 @@ def extract_history(output_dir):
     -------
     history : dict
         Dictionary containing:
-        - 'global': np.ndarray (n_steps, 14)
-            Columns: step, eps_xx, eps_yy, eps_zz, eps_xy, eps_xz, eps_yz,
-                    sig_xx, sig_yy, sig_zz, sig_xy, sig_xz, sig_yz,
-                    cascade_steps, total_flips
-        - 'cascade': list of dict
-            Each entry: {'global_step': int, 'local_step': int, 
-                        'num_unstable': int, 'flipped_voxels': list}
+
+        - ``'global'`` (np.ndarray (n_steps, 14)) -- Columns: step, eps_xx,
+          eps_yy, eps_zz, eps_xy, eps_xz, eps_yz, sig_xx, sig_yy, sig_zz,
+          sig_xy, sig_xz, sig_yz, cascade_steps, total_flips
+        - ``'cascade'`` (list of dict) -- Each entry: {'global_step': int,
+          'local_step': int, 'num_unstable': int, 'flipped_voxels': list}
     
     Examples
     --------
@@ -123,18 +122,18 @@ def analyze_cascades(output_dir):
     -------
     stats : dict
         Dictionary containing:
-        - 'total_cascades': int
-            Total number of cascade events
-        - 'cascade_sizes': np.ndarray
-            Array of cascade sizes (number of flips per cascade)
-        - 'avalanche_steps': np.ndarray
-            Number of local steps per global step
-        - 'total_flips_per_step': np.ndarray
-            Total flips per global step
-        - 'mean_cascade_size': float
-        - 'max_cascade_size': int
-        - 'cascade_size_distribution': tuple (bins, counts)
-            Histogram of cascade sizes
+
+        - ``'total_cascades'`` (int) -- Total number of cascade events
+        - ``'cascade_sizes'`` (np.ndarray) -- Array of cascade sizes
+          (number of flips per cascade)
+        - ``'avalanche_steps'`` (np.ndarray) -- Number of local steps per
+          global step
+        - ``'total_flips_per_step'`` (np.ndarray) -- Total flips per global
+          step
+        - ``'mean_cascade_size'`` (float)
+        - ``'max_cascade_size'`` (int)
+        - ``'cascade_size_distribution'`` (tuple (bins, counts)) --
+          Histogram of cascade sizes
     
     Examples
     --------
@@ -194,16 +193,15 @@ def compute_plastic_strain_evolution(checkpoint_file):
     -------
     plastic_stats : dict
         Dictionary containing:
-        - 'eps_plastic_mean': float
-            Mean von Mises plastic strain
-        - 'eps_plastic_max': float
-            Maximum von Mises plastic strain
-        - 'eps_plastic_field': np.ndarray (nx, ny, nz, 3, 3)
-            Full plastic strain tensor field
-        - 'eps_plastic_vm': np.ndarray (nx, ny, nz)
-            Von Mises plastic strain field
-        - 'active_voxels': int
-            Number of voxels with plastic strain > 0
+
+        - ``'eps_plastic_mean'`` (float) -- Mean von Mises plastic strain
+        - ``'eps_plastic_max'`` (float) -- Maximum von Mises plastic strain
+        - ``'eps_plastic_field'`` (np.ndarray (nx, ny, nz, 3, 3)) -- Full
+          plastic strain tensor field
+        - ``'eps_plastic_vm'`` (np.ndarray (nx, ny, nz)) -- Von Mises
+          plastic strain field
+        - ``'active_voxels'`` (int) -- Number of voxels with plastic strain
+          > 0
     """
     with h5py.File(checkpoint_file, 'r') as f:
         eps_plastic = f['grid/eps_plastic'][:]
@@ -241,12 +239,10 @@ def extract_stress_strain_curves(output_dir, component='xx'):
     -------
     curves : dict
         Dictionary containing:
-        - 'strain': np.ndarray
-            Strain values
-        - 'stress': np.ndarray
-            Stress values (in GPa)
-        - 'component': str
-            Component name
+
+        - ``'strain'`` (np.ndarray) -- Strain values
+        - ``'stress'`` (np.ndarray) -- Stress values (in GPa)
+        - ``'component'`` (str) -- Component name
     
     Examples
     --------

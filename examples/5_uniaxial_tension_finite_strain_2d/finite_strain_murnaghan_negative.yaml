@@ -1,0 +1,36 @@
+seed: 1
+simulation_type: "linear_elastic"
+
+system:
+  dimensionality: "2d"
+  plane_mode: "plane_stress"
+  strain_assumption: "finite_strain"   # <-- NEW: Newton-CG finite strain solver
+  hyperelastic_model: "murnaghan"
+  nx: 32
+  ny: 32
+  pixel: 1.0
+
+material:
+  mu: 65.0
+  lambda: 25.0
+  A: -100.0
+  B: -100.0
+  C: -100.0
+
+loading:
+  eps_target: -0.08
+  step_size: 1e-4
+
+boundary_conditions:
+  driving_component: "xx"
+  mixed_targets:
+    yy: 0.0       # stress-free in transverse direction (Cauchy σ_yy → 0)
+  mixed_tol: 1.0  # MPa
+
+output:
+  directory: "output_finite_strain_murnaghan_negative"
+  duplicate_directory_action: "delete"
+  checkpoint_interval: "none"
+  enable_summary_log: true
+  enable_global_log: true
+  enable_console: false

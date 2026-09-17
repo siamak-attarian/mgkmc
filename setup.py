@@ -1,17 +1,10 @@
-from setuptools import setup, find_packages
+"""Compatibility shim.
 
-setup(
-    name="mgkmc",
-    version="0.1.0",
-    packages=find_packages(),
-    install_requires=[
-        "numpy",
-        "scipy",
-        "matplotlib",
-        "meshio",
-        "pyfftw",
-        "h5py",
-        "numba",
-        "pyyaml",
-    ],
-)
+All packaging metadata lives in ``pyproject.toml``; this file exists only so
+that ``pip install -e .`` keeps working with older pip/setuptools versions that
+still expect a setup script.
+"""
+
+from setuptools import setup
+
+setup()

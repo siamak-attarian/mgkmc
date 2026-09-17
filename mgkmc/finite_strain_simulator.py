@@ -148,10 +148,10 @@ def build_ghat4_2d(nx, ny, Lx, Ly, even_grid=False):
     """
     Build the 2D de Geus projection operator in Fourier space.
 
-    Shape: [2, 2, 2, 2, nx, ny]
+    Shape: ``[2, 2, 2, 2, nx, ny]``
 
-    Ĝ_{ijlm}(q) = δ_{im} ξ_j(q) ξ_l(q) / |ξ|²
-    where ξ_i = q_i / L_i  (scaled frequency)
+    ``Ĝ_{ijlm}(q) = δ_{im} ξ_j(q) ξ_l(q) / |ξ|²``
+    where ``ξ_i = q_i / L_i`` (scaled frequency)
 
     Zero at q = 0  (ensures zero mean of δF → prescribed F̄ is preserved).
 
@@ -1122,10 +1122,10 @@ def build_ghat4_3d(nx, ny, nz, Lx, Ly, Lz, even_grid=False):
     """
     Build the 3D de Geus projection operator in Fourier space.
 
-    Shape: [3, 3, 3, 3, nx, ny, nz]
+    Shape: ``[3, 3, 3, 3, nx, ny, nz]``
 
-    Ĝ_{ijlm}(q) = δ_{im} ξ_j(q) ξ_l(q) / |ξ|²
-    where ξ_i = q_i / L_i
+    ``Ĝ_{ijlm}(q) = δ_{im} ξ_j(q) ξ_l(q) / |ξ|²``
+    where ``ξ_i = q_i / L_i``
 
     Zero at q = 0 (enforces zero mean).
     """

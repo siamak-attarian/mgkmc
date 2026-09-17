@@ -61,6 +61,38 @@ mgkmc.linear_elastic_simulator module
    :show-inheritance:
    :undoc-members:
 
+mgkmc.kmc_simulator module
+--------------------------
+
+.. automodule:: mgkmc.kmc_simulator
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+mgkmc.kmc_simulator_functions module
+------------------------------------
+
+.. automodule:: mgkmc.kmc_simulator_functions
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+mgkmc.finite_strain_simulator module
+------------------------------------
+
+.. automodule:: mgkmc.finite_strain_simulator
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+mgkmc.stability module
+----------------------
+
+.. automodule:: mgkmc.stability
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 Module contents
 ---------------
 

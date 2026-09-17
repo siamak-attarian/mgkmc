@@ -143,19 +143,33 @@ def stability_report(lam, mu, v1, v2, v3, g1, g2, g3, g4,
                      uncapped_scans=None):
     """Per-path stability summary for a material calibration.
 
-    Returns a list of dicts with keys:
-      path            : path name
-      t_unstable      : load at which the UNCAPPED tangent first goes
-                        indefinite (or the solve diverges); None if stable
-                        throughout [0, t_max]
-      t_engage        : load at which E_eq first reaches the cap limit
-      margin          : 1 - t_engage/t_unstable  (fraction of load-to-instability
-                        left when the cap engages); None if no instability
-      capped_min_eig  : smallest tangent eigenvalue along the CAPPED path (Pa)
-      capped_truncated: True if the capped solve itself diverged (bad!)
+    Parameters
+    ----------
+    uncapped_scans : dict, optional
+        Mapping of path name to a previously computed scan result, reused
+        across cap-limit sweeps. The uncapped scan does not depend on the
+        limit, so it need only be computed once.
 
-    uncapped_scans : optional dict path-name -> scan result to reuse across
-        cap-limit sweeps (the uncapped scan does not depend on the limit).
+    Returns
+    -------
+    list of dict
+        One entry per path, with the keys:
+
+        ``path``
+            Path name.
+        ``t_unstable``
+            Load at which the UNCAPPED tangent first goes indefinite (or the
+            solve diverges); ``None`` if stable throughout ``[0, t_max]``.
+        ``t_engage``
+            Load at which ``E_eq`` first reaches the cap limit.
+        ``margin``
+            ``1 - t_engage/t_unstable``, the fraction of load-to-instability
+            left when the cap engages; ``None`` if there is no instability.
+        ``capped_min_eig``
+            Smallest tangent eigenvalue along the CAPPED path (Pa).
+        ``capped_truncated``
+            True if the capped solve itself diverged, which indicates a
+            problem with the capping parameters.
     """
     mat = (lam, mu, v1, v2, v3, g1, g2, g3, g4)
     paths = paths if paths is not None else DEFAULT_PATHS

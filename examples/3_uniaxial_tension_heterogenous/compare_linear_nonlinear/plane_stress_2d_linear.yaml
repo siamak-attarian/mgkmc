@@ -1,0 +1,36 @@
+seed: 1
+simulation_type: "linear_elastic"
+
+system:
+  dimensionality: "2d"
+  plane_mode: "plane_stress"
+  strain_assumption: "small_strain"
+  nx: 128
+  ny: 128
+  pixel: 1.0
+
+material:
+  # Supply lambda and mu0 directly (GPa) — same spatial seed/correlation as
+  # the linear config's E field so the microstructures are statistically equivalent.
+  # Relative heterogeneity: std/mean ~ 5/70 ~ 7.1% applied to both fields.
+  lambda: 80.937
+  mu: 23.700
+
+loading:
+  eps_target: 0.08
+  step_size: 1e-4
+
+boundary_conditions:
+  driving_component: "xx"
+  mixed_targets:
+    yy: 0.0
+  mixed_tol: 1.0
+
+output:
+  directory: "output_linear"
+  duplicate_directory_action: "delete"
+  checkpoint_interval: "none"
+  vtk_interval: "100"
+  enable_summary_log: true
+  enable_global_log: true
+  enable_console: false

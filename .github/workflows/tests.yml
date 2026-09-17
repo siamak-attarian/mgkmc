@@ -1,0 +1,79 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest and newest supported. The suite itself runs in seconds;
+        # almost all CI time is numba JIT compilation, so a wide matrix
+        # costs a lot for little extra coverage.
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # pyfftw builds against the system FFTW3 headers when no wheel is
+      # available for the interpreter version.
+      - name: Install FFTW3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfftw3-dev
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      # The numba kernels use @jit(cache=True); caching the compiled artefacts
+      # keeps repeat runs from paying the full JIT cost every time.
+      - name: Cache numba JIT artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            mgkmc/**/__pycache__
+          key: numba-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('mgkmc/**/*.py') }}
+
+      - name: Show resolved environment
+        run: pip list
+
+      - name: Run tests
+        run: pytest -q
+
+  docs:
+    name: sphinx build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install FFTW3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfftw3-dev
+
+      - name: Install package with docs extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+
+      # autodoc imports every module, so this also catches import-time breakage.
+      - name: Build documentation
+        run: python -m sphinx -b html docs docs/_build/html
