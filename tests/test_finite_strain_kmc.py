@@ -214,8 +214,15 @@ def test_murnaghan_vs_svk_2d():
 def test_murnaghan_homogeneous_vs_analytical():
     print("\n--- Testing Homogeneous Murnaghan vs Analytical 1D ---")
     import sys
+    # The analytical reference lives in an `othercode/` directory alongside the
+    # repository rather than inside it, so it is absent on a fresh clone and in
+    # CI. Skip there instead of failing.
     sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    from othercode.comparison import calculate_murnaghan_stress
+    comparison = pytest.importorskip(
+        "othercode.comparison",
+        reason="analytical reference (othercode/) is not part of this repository",
+    )
+    calculate_murnaghan_stress = comparison.calculate_murnaghan_stress
     
     l_val = 40.38461538e9
     m_val = 26.92307692e9
